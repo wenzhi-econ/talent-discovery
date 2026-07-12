@@ -1,0 +1,1 @@
+A repository for the talent discovery project with Revelio data.
