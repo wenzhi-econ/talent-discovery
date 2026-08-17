@@ -1,0 +1,162 @@
+name: Talent
+
+channels:
+  - conda-forge
+  - nodefaults
+
+dependencies:
+  # Python and development
+  - python=3.12.13
+  - pip=26.2.1
+  - ruff=0.16.3
+  - pytest=9.1.1
+
+  # Interactive Python, notebooks, and reporting
+  - ipython=9.16.1
+  - ipykernel=7.3.0
+  - jupyterlab=4.6.3
+  - notebook=7.6.2
+  - ipywidgets=8.1.8
+  - jupytext=1.19.5
+  - marimo=0.23.16
+  - nbconvert=7.17.1
+  - nbconvert-webpdf=7.17.1
+  - quarto=1.9.38
+
+  # General utilities
+  - rich=15.0.0
+  - python-dotenv=1.2.2
+  - watchdog=6.0.0
+
+  # Browser support for Playwright and web-PDF export.
+  - playwright=1.62.1
+  - playwright-python=1.62.0
+
+  # Core numerical and data-processing packages
+  - pyyaml=6.0.3
+  - numpy=2.4.6
+  - scipy=1.18.0
+  - pandas=3.0.5
+  - polars=1.43.2
+  - pyarrow=25.0.0
+  - pandera-pandas=0.32.1
+  - pandera-polars=0.32.1
+  - python-duckdb=1.5.5
+  - sqlalchemy=2.0.52
+  - pyreadstat=1.3.6
+  - numexpr=2.14.2
+  - bottleneck=1.6.0
+
+  # Figures and visualization
+  - matplotlib=3.11.1
+  - seaborn=0.13.2
+  - plotnine=0.15.8
+  - plotly=6.9.0
+  - altair=6.2.2
+
+  # Excel files
+  - xlrd=2.0.2
+  - xlsxwriter=3.2.9
+  - openpyxl=3.1.5
+  - fastexcel=0.20.2
+
+  # PySpark
+  - openjdk=21
+  - pyspark=4.1.2
+
+  # Numerical and dynamic economic models
+  - numba=0.66.0
+  - sympy=1.14.0
+  - quantecon=0.11.4
+  - xarray=2026.7.0
+  - joblib=1.5.3
+  - tqdm=4.70.0
+
+  # Econometrics and statistics
+  - statsmodels=0.14.6
+  - linearmodels=7.0
+  - patsy=1.0.2
+
+  # Traditional machine learning
+  - scikit-learn=1.9.0
+  - xgboost=3.4.0
+  - lightgbm=4.7.0
+  - shap=0.52.0
+  - imbalanced-learn=0.14.2
+  - optuna=4.9.0
+
+  # Natural language processing
+  # spaCy and its English model cover tokenization, tagging, parsing, and NER.
+  - spacy=3.8.14
+  - spacy-model-en_core_web_sm=3.8.0
+  - spacy-lookups-data=1.0.5
+  - nltk=3.10.3
+
+  # Classical and modern topic modeling
+  - gensim=4.4.0
+  - umap-learn=0.5.12
+  - hdbscan=0.8.44
+  - pyldavis=3.4.1
+
+  # Tokenization, text cleanup, and NLP visualization
+  - sentencepiece=0.2.1
+  - tiktoken=0.13.0
+  - rapidfuzz=3.14.5
+  - ftfy=6.3.1
+  - wordcloud=1.9.6
+
+  # Web pages and APIs
+  - requests=2.34.2
+  - httpx=0.28.1
+  - requests-cache=1.3.3
+  - tenacity=9.1.4
+  - beautifulsoup4=4.15.0
+  - html5lib=1.1
+  - lxml=6.1.1
+
+  - pip:
+    # Use the official CUDA 12.6 PyTorch wheels.
+    - --extra-index-url=https://download.pytorch.org/whl/cu126
+
+    # Core GPU-enabled deep-learning framework
+    - torch==2.13.0+cu126
+    - torchvision==0.28.0+cu126
+
+    # Deep-learning training and evaluation
+    - lightning==2.6.5
+    - torchmetrics==1.9.0
+    - tensorboard==2.21.0
+
+    # Differentiable and JIT-compiled numerical computing.
+    - jax==0.11.0
+    - jaxlib==0.11.0
+
+    # Hugging Face and transformer models
+    - transformers==5.14.1
+    - accelerate==1.14.0
+    - datasets==5.0.0
+    - huggingface-hub==1.24.0
+    - safetensors==0.8.0
+
+    # Embeddings, semantic NLP, topic modeling.
+    - tokenizers==0.22.2
+    - sentence-transformers==5.7.0
+    - bertopic==0.17.4
+    - keybert==0.9.0
+    - lingua-language-detector==2.2.0
+
+    # Main-text and metadata extraction from scraped web pages
+    - trafilatura==2.1.0
+
+    # AI APIs and structured agents
+    - openai==2.46.0
+    - pydantic==2.13.4
+    - pydantic-ai==2.29.0
+
+    # Econometrics
+    - pyfixest==0.60.0
+    - marginaleffects==0.6.1
+
+    # Countries
+    - wbgapi==1.0.14
+    - pycountry==26.2.16

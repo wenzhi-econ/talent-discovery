@@ -1,0 +1,58 @@
+# <> Track only the following folders: codes, and reports.
+/*
+!/.gitignore
+!/.gitattributes
+!/codes/
+!/reports/
+!/Env_Talent.yml
+!/README.md
+
+# <> Ignore specific files from the `codes` folder.
+
+# >> API keys
+/codes/api.py
+
+# >> Generated Python and notebook state
+/codes/**/__pycache__/
+/codes/**/__marimo__/
+/codes/**/.ipynb_checkpoints/
+/codes/**/.mypy_cache/
+/codes/**/.pytest_cache/
+/codes/**/.ruff_cache/
+/codes/**/*.py[cod]
+
+# >> Datasets or generated outputs
+/codes/**/data/
+/codes/**/outputs/
+/codes/**/*.arrow
+/codes/**/*.csv
+/codes/**/*.dta
+/codes/**/*.feather
+/codes/**/*.h5
+/codes/**/*.hdf5
+/codes/**/*.jsonl
+/codes/**/*.parquet
+/codes/**/*.pickle
+/codes/**/*.pkl
+/codes/**/*.sav
+/codes/**/*.sas7bdat
+/codes/**/*.tsv
+/codes/**/*.xls
+/codes/**/*.xlsx
+/codes/**/*.zip
+
+# <> Track only final reports in pdf or python files (no tex files or figures).
+
+/reports/**
+!/reports/**/
+!/reports/**/*.pdf
+!/reports/**/*.py
+!/reports/**/*.ipynb
+!/reports/**/*.md
+
+# >> Some pdf files in the `outputs` subfolder are figures.
+/reports/**/outputs/
+
+# <> Ignore archive directories regardless of depth, prefix, suffix, or case.
+/codes/**/*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]*/
+/reports/**/*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]*/
