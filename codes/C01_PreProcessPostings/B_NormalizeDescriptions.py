@@ -30,7 +30,7 @@ import json
 import re
 import sys
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypeAlias, TypedDict, cast
 
@@ -47,7 +47,7 @@ import _Utilities_C01 as util
 # <> Step 0. Specify global parameters
 # <>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>
 
-# impt: The following are the important rules during the normalization process.
+# impt: This step lists important rules in the normalization process.
 
 BULLET_PATTERNS: Final[re.Pattern[str]] = re.compile(
     r"^\s*(?:[•·▪◦*-]|\d+[.)]|\(\d+\)|[A-Za-z][.)]|\([A-Za-z]\)|[ivx]{2,}[.)]|\([ivx]{2,}\))\s+"
@@ -84,6 +84,7 @@ HTML_CONTAINER_TAGS: Final[frozenset[str]] = frozenset(
         "dd",
     }
 )
+HTML_TEXT_SEPARATOR_TAGS: Final[frozenset[str]] = frozenset({"td", "th"})
 SHORT_TEXT_THRESHOLD = 120
 
 
@@ -233,7 +234,22 @@ class T_BlockOwner(NamedTuple):
     block_type: T_BlockType
     heading_level: int | None
     source_tag: str | None
-    locks_inline_markup: bool
+    allows_inferred_blocks: bool
+
+
+class T_HtmlTextEvent(NamedTuple):
+    """One retained HTML text fragment and the block metadata that owns it."""
+
+    owner: T_BlockOwner
+    text: str
+
+
+class T_HtmlBlockBoundary:
+    """Marker separating text that must be stored in different blocks."""
+
+
+T_HtmlEvent: TypeAlias = T_HtmlTextEvent | T_HtmlBlockBoundary
+HTML_BLOCK_BOUNDARY: Final[T_HtmlBlockBoundary] = T_HtmlBlockBoundary()
 
 
 class T_CanonicalBlocks(TypedDict):
@@ -477,211 +493,133 @@ def remove_noncontent_elements(soup: BeautifulSoup, removal: list[str] = REMOVAL
         element.decompose()
 
 
-def walk_html_blocks(soup: BeautifulSoup) -> list[T_ParsedBlocks]:
-    R"""
-    Convert the remaining HTML text into ordered blocks without loss or duplication.
+def owner_for_explicit_tag(tag_name: str) -> T_BlockOwner:
+    """Return the block metadata supplied by an explicit HTML block tag."""
+    if tag_name.startswith("h"):
+        return T_BlockOwner("HEADING", int(tag_name[1]), tag_name, False)
+    if tag_name == "li":
+        return T_BlockOwner("LIST_ITEM", None, tag_name, False)
+    if tag_name == "tr":
+        return T_BlockOwner("TABLE_ROW", None, tag_name, False)
+    return T_BlockOwner("PARAGRAPH", None, tag_name, False)
 
-    Notes:
-    (1) ``BeautifulSoup`` represents HTML as a tree.
-        (a) An HTML element such as ``<p>...</p>`` is represented by a ``Tag`` object.
-        (b) The actual words inside a tag are represented by ``NavigableString`` objects, which I
-            refer to below as "text nodes."
-        (c) Tags can contain other tags and text nodes. These nested objects are called children.
-    (2) The lossless invariant is that every remaining text node is visited once, in document order,
-        and assigned to exactly one output block.
-        (a) No selected tag extracts all descendant text with ``get_text`` and then also visits
-            those descendants. This prevents duplicated text.
-        (b) No tag is ignored merely because it lacks a recognized semantic role. The traversal
-            still visits its children, which prevents loose text from being lost.
-    (3) "Lossless" applies after the intended preprocessing and normalization.
-        (a) ``remove_noncontent_elements`` normally removes ``script``, ``style``, ``noscript``, and
-            ``iframe`` elements before this function is called.
-        (b) HTML markup, attributes, and the original whitespace are not retained as text.
-        (c) ``normalize_block_text`` standardizes Unicode and whitespace in every retained text
-            node.
-    (4) HTML supplies the primary block type when it uses an explicit ``h1``--``h6``, ``p``, ``li``,
-        or ``tr`` tag. Short bold text outside such a tag is treated as an inferred heading.
 
-    Explanations of the workflow:
-    (A) Initialize the output and the pending-text buffer.
-        (a) ``blocks`` stores completed output blocks in document order.
-        (b) ``pending_fragments`` stores consecutive normalized text nodes that belong to the same
-            owner and can therefore be combined into one block.
-        (c) ``pending_owner`` records the type, heading level, source tag, and inline-markup rule
-            for those pending fragments.
-        (d) Here, an "owner" is simply the rule and metadata responsible for one text run. It is not
-            another object supplied by BeautifulSoup.
-    (B) Define ``flush_pending`` to finish one accumulated block.
-        (a) The pending fragments are joined with one space and normalized again.
-        (b) A nonempty result is appended with the metadata supplied by ``pending_owner``.
-        (c) The buffer and owner are then cleared before later text is collected.
-    (C) Define ``append_text`` to assign one text node to one owner.
-        (a) Empty text after normalization is ignored.
-        (b) Text continues in the same pending block when its owner has not changed.
-        (c) When the owner changes, the existing pending block is flushed before the new text is
-            collected. This preserves the order of differently structured content.
-    (D) Traverse the BeautifulSoup tree recursively with ``visit_node``.
-        (a) Recursion means that the function visits a tag and then visits each of its children from
-            first to last before returning to the tag's later siblings.
-        (b) Ordinary ``NavigableString`` and ``CData`` nodes are sent to ``append_text`` exactly
-            once.
-        (c) Comments, declarations, and other special string subclasses are ignored, matching the
-            main-content behavior of BeautifulSoup's ``get_text`` method.
-        (d) A tag normally passes its children to ``visit_node`` even when the tag itself has no
-            recognized semantic meaning. Therefore, text inside ``span``, ``a``, ``em``, and custom
-            tags is retained.
-    (E) Ignore intentionally removed content and handle visual boundaries.
-        (a) A tag named in ``REMOVAL_CONTENTS`` and all of its children are ignored defensively.
-        (b) ``hr`` always ends the current pending block.
-        (c) ``br`` ends a fallback text run, but it does not split text already owned by an explicit
-            paragraph, heading, list item, table row, or bold-text block.
-    (F) Let explicit HTML block tags determine semantic ownership.
-        (a) ``h1`` through ``h6`` create ``HEADING`` owners with numbered heading levels.
-        (b) ``p`` creates a ``PARAGRAPH`` owner, ``li`` creates a ``LIST_ITEM`` owner, and ``tr``
-            creates a ``TABLE_ROW`` owner.
-        (c) Pending text is flushed before and after each explicit tag, making that tag a structural
-            boundary.
-        (d) Inline markup nested inside an explicit owner cannot create another owner. For example,
-            ``<p>Hello <strong>world</strong></p>`` remains one paragraph containing
-            ``Hello world``.
-        (e) A nested explicit block can still create its own owner. Direct text before and after it
-            is preserved as separate blocks belonging to the surrounding explicit tag.
-    (G) Infer headings from ``strong`` and ``b`` only when no explicit owner has already claimed
-        them.
-        (a) Bold text at most ``SHORT_TEXT_THRESHOLD`` characters long becomes an unnumbered
-            ``HEADING``. Longer bold text becomes a ``PARAGRAPH``.
-        (b) The bold tag becomes a locked owner while its children are traversed. Nested bold tags
-            therefore cannot extract the same text again.
-        (c) If a bold tag contains an explicit block such as ``li``, the explicit block temporarily
-            takes ownership of its own text. This retains the structure without duplicating it.
-    (H) Use container tags to delimit otherwise unstructured text.
-        (a) ``HTML_CONTAINER_TAGS`` includes common containers such as ``html``, ``body``, ``div``,
-            ``section``, ``article``, lists, tables, and description-list containers.
-        (b) Outside an explicit owner, entering or leaving one of these tags flushes pending text
-            and assigns its loose text to a fallback ``PARAGRAPH`` owned by that container.
-        (c) Inside an explicit owner, a nested container keeps the existing owner. This prevents a
-            wrapper ``div`` inside an ``li`` from changing list text into a paragraph.
-    (I) Start at the document root and finish the final pending block.
-        (a) Root-level loose text initially receives a fallback ``PARAGRAPH`` owner with no source
-            tag.
-        (b) Each top-level child is visited in document order.
-        (c) A final call to ``flush_pending`` stores any text remaining after the last child.
-        (d) If the tree contains no remaining main-content text, the function returns an empty list.
-    (J) Why the workflow is lossless with respect to normalized text.
-        (a) Text is collected only from individual text nodes, never from both a tag and its
-            descendants.
-        (b) Every ordinary text node is reached because unrecognized tags are traversed rather than
-            discarded.
-        (c) Each text node enters one pending buffer under one owner, and every nonempty buffer is
-            eventually flushed once.
-        (d) Consequently, joining the returned block texts in order reconstructs the same normalized
-            text-node sequence found in the preprocessed BeautifulSoup tree.
-    """
-    blocks: list[T_ParsedBlocks] = []
-    pending_fragments: list[str] = []
-    pending_owner: T_BlockOwner | None = None
+def iter_html_block_events(
+    node: object,
+    owner: T_BlockOwner,
+) -> Iterator[T_HtmlEvent]:
+    """Yield each retained text node once, with explicit block-boundary markers."""
+    # Check exact types because comments inherit from NavigableString but are not visible text.
+    if type(node) in {NavigableString, CData}:
+        yield T_HtmlTextEvent(owner, str(node))
+        return
+    if not isinstance(node, Tag):
+        return
 
-    def flush_pending() -> None:
-        """
-        Store the current run of text, if any, and reset its owner.
-        """
-        nonlocal pending_owner
-        if pending_fragments and pending_owner is not None:
-            text = normalize_block_text(" ".join(pending_fragments))
-            if text:
-                blocks.append(
-                    {
-                        "block_type": pending_owner.block_type,
-                        "heading_level": pending_owner.heading_level,
-                        "text": text,
-                        "source_tag": pending_owner.source_tag,
-                    }
-                )
-        pending_fragments.clear()
-        pending_owner = None
+    tag_name = node.name.lower() if isinstance(node.name, str) else None
+    if tag_name in REMOVAL_CONTENTS:
+        return
 
-    def append_text(value: str, owner: T_BlockOwner) -> None:
-        """
-        Append one normalized text node to the pending block owned by ``owner``.
-        """
-        nonlocal pending_owner
-        text = normalize_block_text(value)
-        if not text:
-            return
-        if pending_owner != owner:
-            flush_pending()
-            pending_owner = owner
-        pending_fragments.append(text)
+    if tag_name == "hr" or (tag_name == "br" and owner.allows_inferred_blocks):
+        yield HTML_BLOCK_BOUNDARY
+        return
+    if tag_name == "br":
+        yield T_HtmlTextEvent(owner, " ")
+        return
 
-    def visit_node(node: object, owner: T_BlockOwner) -> None:
-        """
-        Visit one BeautifulSoup node and then its children in document order.
-        """
-        # Check exact types because comments also inherit from ``NavigableString`` but should not
-        # become job-description text.
-        if type(node) in {NavigableString, CData}:
-            append_text(str(node), owner)
-            return
-        if not isinstance(node, Tag):
-            return
-
-        if not isinstance(node.name, str):
-            for child in node.children:
-                visit_node(child, owner)
-            return
-
-        tag_name = node.name.lower()
-        if tag_name in REMOVAL_CONTENTS:
-            return
-        if tag_name == "hr" or (tag_name == "br" and not owner.locks_inline_markup):
-            flush_pending()
-            return
-        if tag_name == "br":
-            return
-
-        if tag_name in BLOCK_TAGS:
-            flush_pending()
-            if tag_name.startswith("h") and len(tag_name) == 2:
-                tag_owner = T_BlockOwner("HEADING", int(tag_name[1]), tag_name, True)
-            elif tag_name == "li":
-                tag_owner = T_BlockOwner("LIST_ITEM", None, tag_name, True)
-            elif tag_name == "tr":
-                tag_owner = T_BlockOwner("TABLE_ROW", None, tag_name, True)
-            else:
-                tag_owner = T_BlockOwner("PARAGRAPH", None, tag_name, True)
-            for child in node.children:
-                visit_node(child, tag_owner)
-            flush_pending()
-            return
-
-        if tag_name in {"strong", "b"} and not owner.locks_inline_markup:
-            flush_pending()
-            # This combined text chooses metadata only; individual child nodes supply the output.
-            bold_text = normalize_block_text(node.get_text(" ", strip=True))
-            bold_type: T_BlockType = (
-                "HEADING" if len(bold_text) <= SHORT_TEXT_THRESHOLD else "PARAGRAPH"
-            )
-            bold_owner = T_BlockOwner(bold_type, None, tag_name, True)
-            for child in node.children:
-                visit_node(child, bold_owner)
-            flush_pending()
-            return
-
-        if tag_name in HTML_CONTAINER_TAGS and not owner.locks_inline_markup:
-            flush_pending()
-            container_owner = T_BlockOwner("PARAGRAPH", None, tag_name, False)
-            for child in node.children:
-                visit_node(child, container_owner)
-            flush_pending()
-            return
-
+    if tag_name in BLOCK_TAGS:
+        yield HTML_BLOCK_BOUNDARY
+        explicit_owner = owner_for_explicit_tag(tag_name)
         for child in node.children:
-            visit_node(child, owner)
+            yield from iter_html_block_events(child, explicit_owner)
+        yield HTML_BLOCK_BOUNDARY
+        return
 
-    root_owner = T_BlockOwner("PARAGRAPH", None, None, False)
-    for child in soup.children:
-        visit_node(child, root_owner)
-    flush_pending()
+    if tag_name in {"strong", "b"} and owner.allows_inferred_blocks:
+        yield HTML_BLOCK_BOUNDARY
+        # get_text() chooses metadata only. Descendant nodes still supply all output text.
+        bold_text = normalize_block_text(node.get_text(" ", strip=True))
+        bold_type: T_BlockType = (
+            "HEADING" if len(bold_text) <= SHORT_TEXT_THRESHOLD else "PARAGRAPH"
+        )
+        bold_owner = T_BlockOwner(bold_type, None, tag_name, False)
+        for child in node.children:
+            yield from iter_html_block_events(child, bold_owner)
+        yield HTML_BLOCK_BOUNDARY
+        return
+
+    if tag_name in HTML_CONTAINER_TAGS and owner.allows_inferred_blocks:
+        yield HTML_BLOCK_BOUNDARY
+        container_owner = T_BlockOwner("PARAGRAPH", None, tag_name, True)
+        for child in node.children:
+            yield from iter_html_block_events(child, container_owner)
+        yield HTML_BLOCK_BOUNDARY
+        return
+
+    if tag_name in HTML_TEXT_SEPARATOR_TAGS:
+        for child in node.children:
+            yield from iter_html_block_events(child, owner)
+        yield T_HtmlTextEvent(owner, " ")
+        return
+
+    for child in node.children:
+        yield from iter_html_block_events(child, owner)
+
+
+def build_html_block(
+    owner: T_BlockOwner | None,
+    fragments: Sequence[str],
+) -> T_ParsedBlocks | None:
+    """Build one output block from adjacent text events sharing the same owner."""
+    if owner is None or not fragments:
+        return None
+    text = normalize_block_text("".join(fragments))
+    if not text:
+        return None
+    return {
+        "block_type": owner.block_type,
+        "heading_level": owner.heading_level,
+        "text": text,
+        "source_tag": owner.source_tag,
+    }
+
+
+def walk_html_blocks(soup: BeautifulSoup) -> list[T_ParsedBlocks]:
+    """
+    Convert retained HTML text into ordered, nonoverlapping blocks.
+
+    The work has two explicit stages. ``iter_html_block_events`` walks the tree in document order
+    and emits each retained text node exactly once, plus visual separators and markers where one
+    block must end. This function combines adjacent fragments only when they share the same owner
+    and no boundary separates them, then normalizes the completed block once. Deferring
+    normalization preserves meaningful spacing across inline tags.
+
+    The preservation guarantee applies to normalized retained text nodes after the documented
+    removals; it does not preserve markup, attributes, comments, exact whitespace, or removed
+    elements.
+    """
+    root_owner = T_BlockOwner("PARAGRAPH", None, None, True)
+    blocks: list[T_ParsedBlocks] = []
+    pending_owner: T_BlockOwner | None = None
+    pending_fragments: list[str] = []
+
+    for event in iter_html_block_events(soup, root_owner):
+        is_boundary = isinstance(event, T_HtmlBlockBoundary)
+        owner_changed = (
+            not is_boundary and pending_owner is not None and pending_owner != event.owner
+        )
+        if is_boundary or owner_changed:
+            if block := build_html_block(pending_owner, pending_fragments):
+                blocks.append(block)
+            pending_owner = None
+            pending_fragments.clear()
+
+        if isinstance(event, T_HtmlTextEvent):
+            pending_owner = event.owner
+            pending_fragments.append(event.text)
+
+    if block := build_html_block(pending_owner, pending_fragments):
+        blocks.append(block)
     return blocks
 
 
