@@ -18,10 +18,16 @@ Time: 2026-08-21
 """
 
 import os
-import sys
-from pathlib import Path
 import sqlite3
+import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
+from inspect import getdoc
+from pathlib import Path
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 
 CODES_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODES_ROOT))
@@ -101,3 +107,18 @@ def report_status(text: str) -> None:
     print(f"{text}")
     print("=" * 80)
     print("\n")
+
+
+def richprint_docstring(function: Callable[..., object]) -> None:
+    """Print a function's docstring in a titled Rich panel."""
+    function_name = f"{function.__module__}.{function.__name__}"
+    function_docstring = getdoc(function) or "No docstring is available."
+    Console().print(
+        Panel(
+            Text(function_docstring),
+            title=Text(function_name, style="bold blue"),
+            title_align="left",
+            border_style="blue",
+            padding=(1, 2),
+        )
+    )
