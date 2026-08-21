@@ -339,7 +339,6 @@ print(f"\nIn total, there are {n_postings:,} postings and {n_descriptions:,} des
 time_end = util.record_time()
 util.report_status(
     text=(
-        f"Finished running {Path(__file__).name} at {time_start}\n"
-        f"Time used: {time_end - time_start}"
+        f"Finished running {Path(__file__).name} at {time_end}\nTime used: {time_end - time_start}"
     )
 )
