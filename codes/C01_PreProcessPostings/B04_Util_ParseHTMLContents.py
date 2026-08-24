@@ -12,8 +12,9 @@ Run:
     Not applicable.
 
 Dependencies:
-    codes/C01_PreProcessPostings/B00_RulesForNormalization.py
-    codes/C01_PreProcessPostings/B01_Util_ParsePlainTexts.py
+    codes/C01_PreProcessPostings/B01_RulesForNormalization.py
+    codes/C01_PreProcessPostings/B02_Util_TypeHinting.py
+    codes/C01_PreProcessPostings/B03_Util_ParsePlainTexts.py
 
 To be imported by:
     codes/C01_PreProcessPostings/B_NormalizeDescriptions.py
@@ -33,15 +34,13 @@ Notes:
     are deliberately not preserved.
 
 Wang Wenzhi, with the help of CODEX
-Time: 2026-08-21
+Time: 2026-08-23
 """
 
 import re
 from typing import NamedTuple
-from bs4 import BeautifulSoup
-from bs4.element import CData, NavigableString, Tag
 
-from B00_RulesForNormalization import (
+from B01_RulesForNormalization import (
     BLOCK_TAGS,
     HTML_CONTAINER_TAGS,
     HTML_HARD_BOUNDARY_TAGS,
@@ -54,11 +53,11 @@ from B00_RulesForNormalization import (
     HTML_UNNUMBERED_HEADING_TAGS,
     REMOVAL_CONTENTS,
     UNNUMBERED_HEADING_MAX_LENGTH,
-    T_BlockType,
-    T_ParsedBlocks,
 )
-from B01_Util_ParsePlainTexts import normalize_block_text
-
+from B02_Util_TypeHinting import T_BlockType, T_ParsedBlocks
+from B03_Util_ParsePlainTexts import normalize_block_text
+from bs4 import BeautifulSoup
+from bs4.element import CData, NavigableString, Tag
 
 # <>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>
 # <> Class 1. Store the ownership rules for one block
@@ -121,6 +120,11 @@ class HtmlBlockCollector:
     def __init__(self) -> None:
         """
         Initialize an empty list of completed blocks and an empty pending block.
+
+        Notes:
+        (1) ``blocks`` is public because it is the final ordered result returned after traversal.
+        (2) The pending owner and fragments are private implementation state and always refer to at
+            most one unfinished block.
         """
         self.blocks: list[T_ParsedBlocks] = []
         self._pending_owner: T_BlockOwner | None = None
@@ -137,6 +141,10 @@ class HtmlBlockCollector:
                 Raw text from one BeautifulSoup text node, or one separator space introduced by
                 an HTML tag such as ``br``, ``td``, or ``th``.
 
+        Returns:
+            ``None``. The pending state and, when ownership changes, ``blocks`` are updated in
+            place.
+
         Notes:
         (1) Text is appended without immediate normalization because spaces may be split across
             neighboring text nodes and inline tags.
@@ -151,6 +159,9 @@ class HtmlBlockCollector:
     def finish_block(self) -> None:
         """
         Normalize and store the pending block, then reset the pending state.
+
+        Returns:
+            ``None``. A nonempty normalized pending block is appended to ``blocks`` in place.
 
         Notes:
         (1) Joining precedes normalization so that inline markup cannot accidentally concatenate
@@ -186,7 +197,7 @@ class HtmlBlockCollector:
 
 def detect_recognized_html(
     value: str,
-    bullet_pattern: re.Pattern[str] = HTML_RE,
+    html_pattern: re.Pattern[str] = HTML_RE,
 ) -> bool:
     R"""
     Return whether a description contains at least one recognized HTML tag.
@@ -194,7 +205,7 @@ def detect_recognized_html(
     Parameters:
         value:
             Raw job description to inspect.
-        bullet_pattern:
+        html_pattern:
             Compiled, case-insensitive expression defining the recognized HTML tags.
 
     Returns:
@@ -207,7 +218,7 @@ def detect_recognized_html(
         also invoke the HTML route because this function returns ``True``.
     (4) HTML-looking text involving an unrecognized tag alone uses the plain-text route.
     (5) The current default is constructed from ``HTML_TAGS`` and ``HTML_RE`` in file
-        "B00_RulesForNormalization.py":
+        "B01_RulesForNormalization.py":
 
         HTML_TAGS = (
             "html|body|h1|h2|h3|h4|h5|h6|p|div|section|article|ul|ol|li|table|thead|"
@@ -270,7 +281,7 @@ def detect_recognized_html(
         (e) allow zero or more non-``>`` characters for attributes or a self-closing slash, and
         (f) require a closing angle bracket.
     """
-    return bool(bullet_pattern.search(value))
+    return bool(html_pattern.search(value))
 
 
 # <>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>

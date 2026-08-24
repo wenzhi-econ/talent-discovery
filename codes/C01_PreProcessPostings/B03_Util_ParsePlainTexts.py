@@ -12,10 +12,12 @@ Run:
     Not applicable.
 
 Dependencies:
-    codes/C01_PreProcessPostings/B00_RulesForNormalization.py
+    codes/C01_PreProcessPostings/B01_RulesForNormalization.py
+    codes/C01_PreProcessPostings/B02_Util_TypeHinting.py
 
 To be imported by:
     codes/C01_PreProcessPostings/B_NormalizeDescriptions.py
+    codes/C01_PreProcessPostings/B04_Util_ParseHTMLContents.py
 
 Notes:
 (1) This script defines 2 functions for processing plain texts.
@@ -24,19 +26,15 @@ Notes:
 (3) Function ``parse_plain_text_blocks`` is used to extract list items from plain-text descriptions.
 
 Wang Wenzhi, with the help of CODEX
-Time: 2026-08-21
+Time: 2026-08-23
 """
 
 import html
 import re
 import unicodedata
-from B00_RulesForNormalization import (
-    UNICODE_NORMALIZATION,
-    BULLET_PATTERNS,
-    T_BlockType,
-    T_ParsedBlocks,
-)
 
+from B01_RulesForNormalization import BULLET_PATTERNS, UNICODE_NORMALIZATION
+from B02_Util_TypeHinting import T_BlockType, T_ParsedBlocks
 
 # <>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>
 # <> Function 1. Normalize texts
@@ -46,6 +44,16 @@ from B00_RulesForNormalization import (
 def normalize_block_text(value: str) -> str:
     R"""
     Standardize Unicode and whitespace while preserving meaningful punctuation.
+
+    Parameters:
+        value:
+            One block or line of job-description text to normalize. The function expects a string
+            and does not decode HTML character references.
+
+    Returns:
+        Text in the configured Unicode normal form with null characters removed, nonbreaking spaces
+        replaced by ordinary spaces, Windows line endings standardized, repeated horizontal
+        whitespace collapsed, and leading or trailing whitespace removed.
 
     Notes:
     (1) "\x00" is the null character.
@@ -58,6 +66,9 @@ def normalize_block_text(value: str) -> str:
         clear the screen.
     (6) "\v" (Vertical Tab) moves the cursor down to the next vertical tab stop without returning to
         the start of the line.
+    (7) Newline characters are standardized but not collapsed. A caller can therefore decide whether
+        line boundaries define separate blocks.
+    (8) Meaningful punctuation, capitalization, and ordinary internal newlines are preserved.
     """
     value = value.replace("\x00", "")
     value = unicodedata.normalize(UNICODE_NORMALIZATION, value)

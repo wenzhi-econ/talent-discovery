@@ -21,7 +21,7 @@ Run:
     conda run -s -n Talent python codes/C01_PreProcessPostings/B_NormalizeDescriptions.py
 
 Wang Wenzhi, with the help of Codex
-Time: 2026-08-18
+Time: 2026-08-23
 """
 
 import hashlib
@@ -30,7 +30,7 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final, Literal, TypeAlias, TypedDict, cast
+from typing import Final, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -38,19 +38,25 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _Utilities_C01 as util
-from B01_Util_ParsePlainTexts import (
-    T_BlockType,
+from B02_Util_TypeHinting import (
+    T_Blocks,
+    T_CanonicalBlocks,
+    T_Descriptions,
+    T_Maps,
+    T_Normalized,
+    T_NormalizedSqlRow,
     T_ParsedBlocks,
-    normalize_block_text,
-    parse_plain_text_blocks,
+    T_ParseResult,
+    T_ParserUsed,
+    T_ParseStatus,
 )
-from B02_Util_ParseHTMLContents import (
+from B03_Util_ParsePlainTexts import normalize_block_text, parse_plain_text_blocks
+from B04_Util_ParseHTMLContents import (
     detect_recognized_html,
     fallback_if_lxml_empty,
     remove_noncontent_elements,
     walk_html_blocks,
 )
-
 
 # <>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>
 # <> Step 0. Specify global parameters
@@ -88,7 +94,8 @@ LABEL_MAP: Final[dict[str, str]] = {
     "normalized_in_json": "Deterministic JSON defining each normalized description",
     "parse_status": (
         "Outcome of parsing each raw description "
-        "(5 categories: 'NO_VISIBLE_TEXT', 'PARSED_HTML_LXML', 'PARSED_HTML_STDLIB_FALLBACK', 'PARSED_PLAIN_TEXT', 'PARSER_FAILURE')"
+        "(5 categories: 'NO_VISIBLE_TEXT', 'PARSED_HTML_LXML', "
+        "'PARSED_HTML_STDLIB_FALLBACK', 'PARSED_PLAIN_TEXT', 'PARSER_FAILURE')"
     ),
     "parser_used": (
         "Parser used for each raw description (3 categories: 'html.parser', 'lxml', 'plain_text')"
@@ -155,83 +162,6 @@ SCHEMA_BLOCKS: Final[pa.Schema] = pa.schema(
     ]
 )
 
-
-# >>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>
-# >> S-0-3. Useful settings for type hinting
-# >>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>#>>
-
-
-T_ParserUsed: TypeAlias = Literal["html.parser", "lxml", "plain_text"]
-T_ParseStatus: TypeAlias = Literal[
-    "NO_VISIBLE_TEXT",
-    "PARSED_HTML_LXML",
-    "PARSED_HTML_STDLIB_FALLBACK",
-    "PARSED_PLAIN_TEXT",
-    "PARSER_FAILURE",
-]
-
-
-class T_Descriptions(TypedDict):
-    """Fields read from one unique raw description."""
-
-    description_hash: str
-    description: str
-    description_multiplicity: int
-
-
-class T_CanonicalBlocks(TypedDict):
-    """Block fields that define a normalized-description identity."""
-
-    block_type: T_BlockType
-    heading_level: int | None
-    text: str
-
-
-class T_Maps(TypedDict):
-    """Fields written to the raw-to-normalized description map."""
-
-    description_hash: str
-    normalized_hash: str | None
-    description: str
-    normalized: str | None
-    normalized_in_json: str | None
-    parse_status: T_ParseStatus
-    parser_used: T_ParserUsed | None
-    parser_warning_codes: list[str]
-
-
-class T_Normalized(TypedDict):
-    """Fields written for one unique normalized description."""
-
-    normalized_hash: str
-    normalized: str
-    normalized_in_json: str
-    normalized_multiplicity: int
-    normalized_multiplicity_in_description: int
-
-
-class T_Blocks(TypedDict):
-    """Fields written for one parsed block."""
-
-    normalized_hash: str
-    block_id: str
-    block_order: int
-    block_type: T_BlockType
-    source_tag: str | None
-    heading_level: int | None
-    text: str
-    description_hash_example: str
-
-
-T_ParseResult: TypeAlias = tuple[
-    list[T_ParsedBlocks],
-    T_ParseStatus,
-    T_ParserUsed | None,
-    list[str],
-]
-T_NormalizedSqlRow: TypeAlias = tuple[str, str, str, int, int, str, str]
-
-
 # <>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>
 # <> Step 1. Prepare for data transformation
 # <>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>#<>
@@ -276,6 +206,30 @@ for function in (
 def parse_description(raw: str) -> T_ParseResult:
     """
     Select the HTML or plain-text route and return blocks and parser diagnostics.
+
+    Parameters:
+        raw:
+            One raw job description. It may contain recognized HTML tags, plain text, HTML character
+            references, null characters, or no visible text.
+
+    Returns:
+        A four-item tuple containing:
+        (1) parsed blocks in source order;
+        (2) the final parse status;
+        (3) the parser backend used, or ``None`` after a handled parser failure; and
+        (4) ordered warning codes generated while parsing.
+
+    Notes:
+    (1) The presence of any centrally recognized HTML tag selects the HTML route. Otherwise, the
+        description is processed line by line as plain text.
+    (2) The primary HTML backend is lxml. If it produces no blocks even though decoded visible text
+        remains, the description is reparsed with Python's standard-library HTML parser.
+    (3) Empty output from a successful route is classified as ``NO_VISIBLE_TEXT`` while retaining
+        the backend in ``parser_used``.
+    (4) Expected value, type, and Unicode errors become ``PARSER_FAILURE`` records so one malformed
+        description does not terminate the batch. Unexpected errors are allowed to surface.
+    (5) A null-character warning records information loss already implied by the shared text
+        normalization policy.
     """
     warnings: list[str] = ["NUL_REMOVED"] if "\x00" in raw else []
     try:
@@ -310,6 +264,20 @@ def parse_description(raw: str) -> T_ParseResult:
 def dump_json(value: object) -> str:
     """
     Serialize a JSON-compatible value in a deterministic compact form.
+
+    Parameters:
+        value:
+            JSON-compatible Python value to serialize.
+
+    Returns:
+        UTF-8-compatible JSON text with sorted dictionary keys, compact separators, and non-ASCII
+        characters preserved rather than escaped.
+
+    Notes:
+    (1) Deterministic formatting is required because canonical block JSON is hashed to construct a
+        normalized-description identity.
+    (2) The function does not coerce unsupported objects; ``json.dumps`` raises ``TypeError`` for
+        values outside the JSON data model.
     """
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -317,6 +285,17 @@ def dump_json(value: object) -> str:
 def generate_hash_normalized_text(value: str) -> str:
     """
     Generate a hash ID for a normalized description.
+
+    Parameters:
+        value:
+            Deterministic canonical JSON defining one normalized description.
+
+    Returns:
+        Lowercase hexadecimal SHA-256 digest of the UTF-8 encoded input.
+
+    Notes:
+    (1) The caller verifies that an existing digest maps to the same canonical JSON before treating
+        two observations as the same normalized description.
     """
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -324,6 +303,19 @@ def generate_hash_normalized_text(value: str) -> str:
 def build_normalized_text(blocks: Sequence[T_ParsedBlocks]) -> str:
     """
     Join ordered block texts into a human-readable representation.
+
+    Parameters:
+        blocks:
+            Parsed blocks in source order.
+
+    Returns:
+        Block texts separated by two newline characters. An empty sequence produces an empty
+        string.
+
+    Notes:
+    (1) Structural metadata is omitted from this readable representation and remains available in
+        the canonical JSON and block-level output.
+    (2) A blank line between blocks makes boundaries visible without recreating source HTML.
     """
     return "\n\n".join(block["text"] for block in blocks)
 
@@ -333,6 +325,19 @@ def build_canonical_blocks(
 ) -> list[T_CanonicalBlocks]:
     """
     Retain only the block fields that define a normalized identity.
+
+    Parameters:
+        blocks:
+            Parsed blocks in source order, including diagnostic ``source_tag`` metadata.
+
+    Returns:
+        New dictionaries in the same order containing only ``block_type``, ``heading_level``, and
+        ``text``.
+
+    Notes:
+    (1) Excluding ``source_tag`` lets two descriptions share an identity when their visible text and
+        interpreted block structure agree even if the exact HTML tags differ.
+    (2) New dictionaries prevent later serialization from depending on extra parser metadata.
     """
     return [
         {
@@ -446,7 +451,8 @@ for batch in input_file.iter_batches(
                 UPDATE tab_normalized
                 SET
                     normalized_multiplicity = normalized_multiplicity + ?,
-                    normalized_multiplicity_in_description = normalized_multiplicity_in_description + 1
+                    normalized_multiplicity_in_description =
+                        normalized_multiplicity_in_description + 1
                 WHERE normalized_hash = ?;
                 """
                 con.execute(
