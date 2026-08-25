@@ -1,11 +1,15 @@
-# ruff: noqa: B018, PLR1711
+# ruff: noqa: PLR1711
 
 """Summary statistics for the universe of candidate focal new hires."""
 
 import marimo
 
 __generated_with = "0.24.0"
-app = marimo.App(width="full", auto_download=["html"])
+app = marimo.App(
+    width="full",
+    layout_file="layouts/B02_FNH_SummaryStats.slides.json",
+    auto_download=["html"],
+)
 
 
 @app.cell
@@ -426,13 +430,10 @@ def _(ds, hierarchy_number, mo, pd):
     if fnh.empty:
         raise ValueError("The focal-new-hire input contains no observations.")
     return (
-        AVAILABLE_COLUMNS,
         AVAILABLE_RICS_COLUMNS,
         AVAILABLE_ROLE_COLUMNS,
         EXPECTED_RICS_COLUMNS,
         EXPECTED_ROLE_COLUMNS,
-        INPUT_DIR,
-        PARQUET_FILES,
         fnh,
     )
 
@@ -473,16 +474,54 @@ def _(
         column: distribution_table(fnh, column, title_columns.get(column))
         for column in classification_columns
     }
-    onet_role_pairs = (
-        crosswalk_table(fnh, ["onet_code", "onet_title"], "role_k1500")
-        if "role_k1500" in fnh.columns
-        else pd.DataFrame()
-    )
-    role_onet_pairs = (
-        crosswalk_table(fnh, ["role_k1500"], "onet_code", "onet_title")
-        if "role_k1500" in fnh.columns
-        else pd.DataFrame()
-    )
+    if "role_k1500" in fnh.columns:
+        _role_crosswalk_columns = [
+            *AVAILABLE_ROLE_COLUMNS,
+            "onet_code",
+            "onet_title",
+        ]
+        _role_crosswalk_rows = fnh.loc[:, _role_crosswalk_columns].copy()
+        for _column in _role_crosswalk_columns:
+            _role_crosswalk_rows[_column] = (
+                _role_crosswalk_rows[_column]
+                .fillna(MISSING_LABEL)
+                .astype("string")
+            )
+        _role_crosswalk_rows = _role_crosswalk_rows.drop_duplicates()
+        _role_shares = distribution_tables["role_k1500"][["value", "share"]]
+        _role_crosswalk_ordered = _role_crosswalk_rows.merge(
+            _role_shares,
+            left_on="role_k1500",
+            right_on="value",
+            how="left",
+            validate="many_to_one",
+        )
+        _role_crosswalk_ordered["O*NET code and title"] = (
+            _role_crosswalk_ordered["onet_code"]
+            + " — "
+            + _role_crosswalk_ordered["onet_title"]
+        )
+        _role_crosswalk_ordered = _role_crosswalk_ordered.sort_values(
+            ["share", "role_k1500", "O*NET code and title"],
+            ascending=[False, True, True],
+        )
+        role_onet_crosswalk = (
+            _role_crosswalk_ordered.loc[
+                :, [*AVAILABLE_ROLE_COLUMNS, "O*NET code and title"]
+            ]
+            .reset_index(drop=True)
+        )
+        _role_mapping_counts = (
+            _role_crosswalk_rows.loc[
+                _role_crosswalk_rows["role_k1500"] != MISSING_LABEL
+            ].groupby("role_k1500", observed=True).size()
+        )
+        role_onet_cardinality_violations = int((_role_mapping_counts > 1).sum())
+    else:
+        role_onet_crosswalk = pd.DataFrame(
+            columns=[*AVAILABLE_ROLE_COLUMNS, "O*NET code and title"]
+        )
+        role_onet_cardinality_violations = 0
     finest_rics_column = AVAILABLE_RICS_COLUMNS[-1] if AVAILABLE_RICS_COLUMNS else None
     rics_naics_pairs = (
         crosswalk_table(fnh, [finest_rics_column], "naics_code", "naics_description")
@@ -562,19 +601,16 @@ def _(
         "distinct_countries": int(fnh["country"].nunique(dropna=True)),
     }
     return (
-        AVAILABLE_RICS_COLUMNS,
-        AVAILABLE_ROLE_COLUMNS,
-        CLASSIFICATION_LABELS,
         basic_numbers,
         classification_stats,
         distribution_tables,
         finest_rics_column,
         naics_rics_pairs,
         naics_title_diagnostic,
-        onet_role_pairs,
         onet_title_diagnostic,
-        role_onet_pairs,
         rics_naics_pairs,
+        role_onet_cardinality_violations,
+        role_onet_crosswalk,
         schema_report,
     )
 
@@ -691,17 +727,6 @@ def _(AVAILABLE_ROLE_COLUMNS, mo):
     role_top_n_selector = mo.ui.number(
         start=1, stop=1000, step=1, value=50, label="Number of top occupations"
     )
-    mo.vstack(
-        [
-            mo.md("### 2.2. Revelio's own occupation distribution"),
-            mo.hstack(
-                [role_variable_selector, role_top_n_selector],
-                justify="start",
-                gap=2,
-            ),
-        ],
-        gap=1,
-    )
     return role_top_n_selector, role_variable_selector
 
 
@@ -721,6 +746,12 @@ def _(
     )
     mo.vstack(
         [
+            mo.md("### 2.2. Revelio's own occupation distribution"),
+            mo.hstack(
+                [role_variable_selector, role_top_n_selector],
+                justify="start",
+                gap=2,
+            ),
             _chart,
             mo.accordion(
                 {
@@ -739,10 +770,34 @@ def _(
 
 
 @app.cell
-def _(MISSING_LABEL, mo, onet_role_pairs):
+def _(AVAILABLE_ROLE_COLUMNS, mo):
+    onet_role_variable_selector = mo.ui.dropdown(
+        options=list(AVAILABLE_ROLE_COLUMNS),
+        value="role_k1500" if "role_k1500" in AVAILABLE_ROLE_COLUMNS else None,
+        label="Revelio occupation variable",
+    )
+    return (onet_role_variable_selector,)
+
+
+@app.cell
+def _(
+    MISSING_LABEL,
+    crosswalk_table,
+    fnh,
+    mo,
+    onet_role_variable_selector,
+    pd,
+):
+    onet_role_variable = onet_role_variable_selector.value
+    onet_role_pairs = (
+        crosswalk_table(
+            fnh, ["onet_code", "onet_title"], onet_role_variable
+        )
+        if onet_role_variable in fnh.columns
+        else pd.DataFrame()
+    )
     if onet_role_pairs.empty:
         onet_role_selector = None
-        _control = mo.callout(mo.md("`role_k1500` is unavailable."), kind="warn")
     else:
         _choices = {
             f"{left} ({int(group['count'].sum()):,} hires)": left
@@ -756,71 +811,89 @@ def _(MISSING_LABEL, mo, onet_role_pairs):
             label="O*NET occupation",
             full_width=True,
         )
-        _control = onet_role_selector
-    mo.vstack(
-        [
-            mo.md("### 2.3. Crosswalk from O*NET to Revelio's own occupation"),
-            mo.md("Select an O*NET occupation to see its `role_k1500` composition."),
-            _control,
-        ],
-        gap=1,
-    )
-    return (onet_role_selector,)
+    return onet_role_pairs, onet_role_selector, onet_role_variable
 
 
 @app.cell
-def _(make_crosswalk_chart, mo, onet_role_pairs, onet_role_selector):
-    _output = mo.md("")
+def _(
+    make_crosswalk_chart,
+    mo,
+    onet_role_pairs,
+    onet_role_selector,
+    onet_role_variable,
+    onet_role_variable_selector,
+):
+    _control = (
+        onet_role_selector
+        if onet_role_selector is not None
+        else mo.callout(
+            mo.md(f"`{onet_role_variable}` is unavailable."), kind="warn"
+        )
+    )
+    _items = [
+        mo.md("### 2.3. Crosswalk from O*NET to Revelio's own occupation"),
+        mo.md(
+            "Select a Revelio occupation variable and an O*NET occupation to see "
+            "the corresponding role composition."
+        ),
+        mo.hstack(
+            [onet_role_variable_selector, _control],
+            justify="start",
+            gap=2,
+        ),
+    ]
     if onet_role_selector is not None:
         _selected = onet_role_selector.value
         _chart = make_crosswalk_chart(
-            onet_role_pairs, _selected, f"Revelio role composition of {_selected}"
+            onet_role_pairs,
+            _selected,
+            f"Revelio {onet_role_variable} composition of {_selected}",
         )
-        _output = mo.vstack([_chart], gap=1)
-    _output
+        _items.append(_chart)
+    mo.vstack(_items, gap=1)
     return
 
 
 @app.cell
-def _(MISSING_LABEL, mo, role_onet_pairs):
-    if role_onet_pairs.empty:
-        role_onet_selector = None
-        _control = mo.callout(mo.md("`role_k1500` is unavailable."), kind="warn")
+def _(mo, role_onet_cardinality_violations, role_onet_crosswalk):
+    if role_onet_crosswalk.empty:
+        _content = mo.callout(mo.md("`role_k1500` is unavailable."), kind="warn")
     else:
-        _choices = {
-            f"{left} ({int(group['count'].sum()):,} hires)": left
-            for left, group in role_onet_pairs.groupby("left_label", sort=False)
-            if left != MISSING_LABEL
-        }
-        role_onet_selector = mo.ui.dropdown(
-            options=_choices,
-            value=next(iter(_choices)) if _choices else None,
-            searchable=True,
-            label="Revelio role K1,500",
-            full_width=True,
+        if role_onet_cardinality_violations:
+            _diagnostic = mo.callout(
+                mo.md(
+                    f"**Warning:** {role_onet_cardinality_violations:,} nonmissing "
+                    "`role_k1500` categories map to more than one combination of "
+                    "Revelio hierarchy values and O*NET occupation."
+                ),
+                kind="warn",
+            )
+        else:
+            _diagnostic = mo.md(
+                "Each nonmissing `role_k1500` category maps to exactly one combination "
+                "of Revelio occupation hierarchy values and O*NET occupation in the "
+                "current sample. Rows are ordered by the `role_k1500` category's share "
+                "of candidate focal new hires, from largest to smallest."
+            )
+        _content = mo.vstack(
+            [
+                _diagnostic,
+                mo.ui.table(
+                    role_onet_crosswalk,
+                    pagination=True,
+                    page_size=20,
+                    show_column_summaries=False,
+                ),
+            ],
+            gap=1,
         )
-        _control = role_onet_selector
     mo.vstack(
         [
             mo.md("### 2.4. Crosswalk from Revelio's own occupation to O*NET"),
-            mo.md("Select a `role_k1500` category to see its O*NET composition."),
-            _control,
+            _content,
         ],
         gap=1,
     )
-    return (role_onet_selector,)
-
-
-@app.cell
-def _(make_crosswalk_chart, mo, role_onet_pairs, role_onet_selector):
-    _output = mo.md("")
-    if role_onet_selector is not None:
-        _selected = role_onet_selector.value
-        _chart = make_crosswalk_chart(
-            role_onet_pairs, _selected, f"O*NET composition of {_selected}"
-        )
-        _output = mo.vstack([_chart], gap=1)
-    _output
     return
 
 
@@ -840,18 +913,36 @@ def _(mo):
     naics_top_n_selector = mo.ui.number(
         start=1, stop=2000, step=1, value=50, label="Number of top NAICS industries"
     )
-    mo.vstack([mo.md("### 3.1. NAICS distribution"), naics_top_n_selector], gap=1)
     return (naics_top_n_selector,)
 
 
 @app.cell
 def _(distribution_tables, make_share_chart, mo, naics_top_n_selector):
+    _summary = distribution_tables["naics_code"]
     _chart = make_share_chart(
-        distribution_tables["naics_code"],
+        _summary,
         "Top NAICS industries",
         int(naics_top_n_selector.value),
     )
-    _chart
+    mo.vstack(
+        [
+            mo.md("### 3.1. NAICS distribution"),
+            naics_top_n_selector,
+            _chart,
+            mo.accordion(
+                {
+                    "View all NAICS categories": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
 
 
 @app.cell
@@ -863,15 +954,6 @@ def _(AVAILABLE_RICS_COLUMNS, mo):
     )
     rics_top_n_selector = mo.ui.number(
         start=1, stop=2000, step=1, value=50, label="Number of top Revelio industries"
-    )
-    mo.vstack(
-        [
-            mo.md("### 3.2. Revelio's own industry distribution"),
-            mo.hstack(
-                [rics_variable_selector, rics_top_n_selector], justify="start", gap=2
-            ),
-        ],
-        gap=1,
     )
     return rics_top_n_selector, rics_variable_selector
 
@@ -886,19 +968,41 @@ def _(
 ):
     _variable = rics_variable_selector.value
     _top_n = int(rics_top_n_selector.value)
+    _summary = distribution_tables[_variable]
     _chart = make_share_chart(
-        distribution_tables[_variable],
+        _summary,
         f"Top {_top_n} industries in {_variable}",
         _top_n,
     )
-    _chart
+    mo.vstack(
+        [
+            mo.md("### 3.2. Revelio's own industry distribution"),
+            mo.hstack(
+                [rics_variable_selector, rics_top_n_selector],
+                justify="start",
+                gap=2,
+            ),
+            _chart,
+            mo.accordion(
+                {
+                    "View all Revelio industry categories": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
 
 
 @app.cell
 def _(MISSING_LABEL, mo, naics_rics_pairs):
     if naics_rics_pairs.empty:
         naics_rics_selector = None
-        _control = mo.callout(mo.md("No RICS field is available."), kind="warn")
     else:
         _choices = {
             f"{left} ({int(group['count'].sum()):,} hires)": left
@@ -912,25 +1016,29 @@ def _(MISSING_LABEL, mo, naics_rics_pairs):
             label="NAICS code and description",
             full_width=True,
         )
-        _control = naics_rics_selector
-    mo.vstack(
-        [
-            mo.md("### 3.3. Crosswalk from NAICS to Revelio's own industry"),
-            mo.md(
-                "Select a NAICS category to see its finest Revelio industry composition."
-            ),
-            _control,
-        ],
-        gap=1,
-    )
     return (naics_rics_selector,)
 
 
 @app.cell
 def _(
-    finest_rics_column, make_crosswalk_chart, mo, naics_rics_pairs, naics_rics_selector
+    finest_rics_column,
+    make_crosswalk_chart,
+    mo,
+    naics_rics_pairs,
+    naics_rics_selector,
 ):
-    _output = mo.md("")
+    _control = (
+        naics_rics_selector
+        if naics_rics_selector is not None
+        else mo.callout(mo.md("No RICS field is available."), kind="warn")
+    )
+    _items = [
+        mo.md("### 3.3. Crosswalk from NAICS to Revelio's own industry"),
+        mo.md(
+            "Select a NAICS category to see its finest Revelio industry composition."
+        ),
+        _control,
+    ]
     if naics_rics_selector is not None:
         _selected = naics_rics_selector.value
         _chart = make_crosswalk_chart(
@@ -938,8 +1046,25 @@ def _(
             _selected,
             f"{finest_rics_column} composition of {_selected}",
         )
-        _output = mo.vstack([_chart], gap=1)
-    _output
+        _selected_pairs = naics_rics_pairs.loc[
+            naics_rics_pairs["left_label"] == _selected
+        ].copy()
+        _items.extend(
+            [
+                _chart,
+                mo.accordion(
+                    {
+                        "View selected NAICS-to-Revelio crosswalk": mo.ui.table(
+                            _selected_pairs,
+                            pagination=True,
+                            page_size=20,
+                            show_column_summaries=False,
+                        )
+                    }
+                ),
+            ]
+        )
+    mo.vstack(_items, gap=1)
     return
 
 
@@ -947,7 +1072,6 @@ def _(
 def _(MISSING_LABEL, finest_rics_column, mo, rics_naics_pairs):
     if rics_naics_pairs.empty:
         rics_naics_selector = None
-        _control = mo.callout(mo.md("No RICS field is available."), kind="warn")
     else:
         _choices = {
             f"{left} ({int(group['count'].sum()):,} hires)": left
@@ -961,25 +1085,29 @@ def _(MISSING_LABEL, finest_rics_column, mo, rics_naics_pairs):
             label=finest_rics_column,
             full_width=True,
         )
-        _control = rics_naics_selector
-    mo.vstack(
-        [
-            mo.md("### 3.4. Crosswalk from Revelio's own industry to NAICS"),
-            mo.md(
-                f"Select a `{finest_rics_column}` category to see its NAICS composition."
-            ),
-            _control,
-        ],
-        gap=1,
-    )
     return (rics_naics_selector,)
 
 
 @app.cell
 def _(
-    finest_rics_column, make_crosswalk_chart, mo, rics_naics_pairs, rics_naics_selector
+    finest_rics_column,
+    make_crosswalk_chart,
+    mo,
+    rics_naics_pairs,
+    rics_naics_selector,
 ):
-    _output = mo.md("")
+    _control = (
+        rics_naics_selector
+        if rics_naics_selector is not None
+        else mo.callout(mo.md("No RICS field is available."), kind="warn")
+    )
+    _items = [
+        mo.md("### 3.4. Crosswalk from Revelio's own industry to NAICS"),
+        mo.md(
+            f"Select a `{finest_rics_column}` category to see its NAICS composition."
+        ),
+        _control,
+    ]
     if rics_naics_selector is not None:
         _selected = rics_naics_selector.value
         _chart = make_crosswalk_chart(
@@ -987,8 +1115,25 @@ def _(
             _selected,
             f"NAICS composition of {_selected} ({finest_rics_column})",
         )
-        _output = mo.vstack([_chart], gap=1)
-    _output
+        _selected_pairs = rics_naics_pairs.loc[
+            rics_naics_pairs["left_label"] == _selected
+        ].copy()
+        _items.extend(
+            [
+                _chart,
+                mo.accordion(
+                    {
+                        "View selected Revelio-to-NAICS crosswalk": mo.ui.table(
+                            _selected_pairs,
+                            pagination=True,
+                            page_size=20,
+                            show_column_summaries=False,
+                        )
+                    }
+                ),
+            ]
+        )
+    mo.vstack(_items, gap=1)
     return
 
 
@@ -1028,8 +1173,8 @@ def _(country_iso3, distribution_table, fnh, math, us_state_code):
         mapped_country_summary,
         state_map_coverage,
         state_map_data,
-        unmatched_state_data,
         unmapped_country_summary,
+        unmatched_state_data,
     )
 
 
@@ -1061,6 +1206,12 @@ def _(mapped_country_summary, mo, px, unmapped_country_summary):
             _figure,
             mo.accordion(
                 {
+                    "View mapped country data": mo.ui.table(
+                        mapped_country_summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    ),
                     "View country counts not mapped to ISO-3": mo.ui.table(
                         unmapped_country_summary,
                         pagination=True,
@@ -1113,6 +1264,12 @@ def _(mo, px, state_map_coverage, state_map_data, unmatched_state_data):
             ),
             mo.accordion(
                 {
+                    "View mapped U.S. state data": mo.ui.table(
+                        state_map_data,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    ),
                     "View unmatched U.S. state labels": mo.ui.table(
                         unmatched_state_data,
                         pagination=True,
@@ -1161,7 +1318,23 @@ def _(alt, distribution_table, fnh, mo, pd):
         .properties(width="container", height=360)
         .configure_view(stroke=None)
     )
-    mo.vstack([mo.md("### 4.2. Seniority distribution"), _figure], gap=1)
+    mo.vstack(
+        [
+            mo.md("### 4.2. Seniority distribution"),
+            _figure,
+            mo.accordion(
+                {
+                    "View all seniority counts": mo.ui.table(
+                        seniority_summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
     return
 
 
@@ -1198,6 +1371,16 @@ def _(alt, fnh, mo, pd):
             mo.md("### 4.3. Time-series"),
             mo.md("Monthly count by employment start month."),
             _figure,
+            mo.accordion(
+                {
+                    "View all monthly counts": mo.ui.table(
+                        time_series,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
         ],
         gap=1,
     )

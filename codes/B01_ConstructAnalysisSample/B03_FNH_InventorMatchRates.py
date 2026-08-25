@@ -9,8 +9,8 @@ Inputs:
 (b) data/a_raw_data/A_Revelio/revelio_user_id_patentsview_id.csv
 
 Outputs:
-(a) Four reactive marimo sections covering basic counts, occupations, industries,
-    and other geographic, seniority, and start-month results.
+(a) Five reactive marimo sections covering basic counts, occupations, industries,
+    industry-occupation cells, and other geographic, seniority, and start-month results.
 
 Notes:
 (1) The focal-new-hire Parquet dataset has one retained row per user-company pair.
@@ -18,6 +18,9 @@ Notes:
 (3) Every figure has its own local controls; there is no global analysis-control panel.
 (4) User-company rates use focal-new-hire rows as the denominator. User rates use distinct
     users within each displayed group as the denominator.
+(5) Figure accordions expose the exact plotted rows and the corresponding full tables.
+(6) Bar-chart reference lines are pooled rates within the all-country, U.S., and selected
+    (or default non-U.S.) scopes, rather than unweighted averages across countries.
 
 Run:
     $fnh_match_notebook = "codes/B01_ConstructAnalysisSample/B03_FNH_InventorMatchRates.py"
@@ -30,10 +33,14 @@ Time: 2026-08-24
 import marimo
 
 __generated_with = "0.24.0"
-app = marimo.App(width="full", auto_download=["html"])
+app = marimo.App(
+    width="full",
+    layout_file="layouts/B03_FNH_InventorMatchRates.slides.json",
+    auto_download=["html"],
+)
 
 
-@app.cell()
+@app.cell
 def imports():
     import re
 
@@ -48,7 +55,7 @@ def imports():
     return alt, ds, mo, pd, pl, px, pycountry, re
 
 
-@app.cell()
+@app.cell
 def title(mo):
     mo.vstack(
         [
@@ -65,7 +72,7 @@ def title(mo):
     return
 
 
-@app.cell()
+@app.cell
 def helpers(alt, pd, pl, pycountry, re):
     MISSING_LABEL = "<Missing>"
     US_LABEL = "United States"
@@ -78,6 +85,18 @@ def helpers(alt, pd, pl, pycountry, re):
         "United States": "us",
         "Non-U.S.": "non_us",
         "Selected countries": "custom",
+    }
+    RATE_TABLE_FORMATS = {
+        "Match rate": "{:.2%}",
+        "spell_match_rate": "{:.2%}",
+        "user_match_rate": "{:.2%}",
+        "spell_ci_low": "{:.2%}",
+        "spell_ci_high": "{:.2%}",
+        "user_ci_low": "{:.2%}",
+        "user_ci_high": "{:.2%}",
+        "reference_rate": "{:.2%}",
+        "95% CI lower": "{:.2%}",
+        "95% CI upper": "{:.2%}",
     }
 
     def hierarchy_number(column_name):
@@ -269,6 +288,32 @@ def helpers(alt, pd, pl, pycountry, re):
             ),
         )
 
+    def reference_match_rates(data, metric, selected_countries=()):
+        """Calculate exact overall rates for the three chart reference scopes."""
+
+        _reference_labels = {
+            "all": "All-country average",
+            "us": "U.S. average",
+            "non_us": "Non-U.S. average",
+            "custom": "Selected-country average",
+        }
+        _rate_key = "spell_match_rate" if metric == "spell" else "user_match_rate"
+        _rows = []
+        for _scope_detail, _scope_key, _scope_data in country_scope_frames(
+            data,
+            selected_countries,
+        ):
+            _statistics = sample_statistics(_scope_data)
+            _rows.append(
+                {
+                    "reference_scope": _reference_labels[_scope_key],
+                    "scope_detail": _scope_detail,
+                    "scope_key": _scope_key,
+                    "reference_rate": _statistics[_rate_key],
+                }
+            )
+        return pd.DataFrame(_rows)
+
     def scoped_classification_match_rates(
         data,
         value_column,
@@ -333,7 +378,74 @@ def helpers(alt, pd, pl, pycountry, re):
         )
         return _tooltips
 
-    def make_grouped_rate_chart(summary, title, metric, top_n, color_range):
+    def _rate_axis():
+        """Use ticks precise enough to avoid duplicate percent labels."""
+
+        return alt.Axis(format=".1%", tickCount=6, labelOverlap=False)
+
+    def _reference_subtitle(reference_rates):
+        _valid = reference_rates.dropna(subset=["reference_rate"])
+        if _valid.empty:
+            return None
+        _values = "  |  ".join(
+            f"{_row.reference_scope}: {_row.reference_rate:.2%}"
+            for _row in _valid.itertuples()
+        )
+        return f"Reference lines — {_values}"
+
+    def _add_reference_rules(bar_chart, reference_rates, rate_upper):
+        """Layer styled vertical rules for all-country, U.S., and comparison rates."""
+
+        _references = reference_rates.dropna(subset=["reference_rate"]).copy()
+        if _references.empty:
+            return bar_chart
+        _scope_order = _references["reference_scope"].tolist()
+        _rules = (
+            alt.Chart(_references)
+            .mark_rule(strokeWidth=2.25, opacity=0.95)
+            .encode(
+                x=alt.X(
+                    "reference_rate:Q",
+                    scale=alt.Scale(domain=[0, rate_upper]),
+                ),
+                color=alt.Color(
+                    "reference_scope:N",
+                    title="Reference match rate",
+                    scale=alt.Scale(
+                        domain=_scope_order,
+                        range=["#111827", "#DC2626", "#7C3AED"],
+                    ),
+                    legend=alt.Legend(orient="top", direction="horizontal"),
+                ),
+                strokeDash=alt.StrokeDash(
+                    "reference_scope:N",
+                    scale=alt.Scale(
+                        domain=_scope_order,
+                        range=[[1, 0], [8, 4], [2, 3]],
+                    ),
+                    legend=None,
+                ),
+                tooltip=[
+                    alt.Tooltip("reference_scope:N", title="Reference scope"),
+                    alt.Tooltip("scope_detail:N", title="Included countries"),
+                    alt.Tooltip(
+                        "reference_rate:Q",
+                        title="Reference match rate",
+                        format=".2%",
+                    ),
+                ],
+            )
+        )
+        return alt.layer(bar_chart, _rules).resolve_scale(color="independent")
+
+    def make_grouped_rate_chart(
+        summary,
+        title,
+        metric,
+        top_n,
+        color_range,
+        reference_rates,
+    ):
         """Select large categories, then rank their bars by the all-country rate."""
 
         _rate_column, _, _high_column, _ = metric_columns(metric)
@@ -367,19 +479,24 @@ def helpers(alt, pd, pl, pycountry, re):
             categories=_scope_order,
             ordered=True,
         )
+        _reference_max = reference_rates["reference_rate"].max(skipna=True)
         _rate_upper = min(
             1.0,
-            max(float(_shown[_high_column].max()) * 1.08, 0.01),
+            max(
+                float(_shown[_high_column].max()) * 1.08,
+                float(_reference_max) * 1.08,
+                0.01,
+            ),
         )
-        _chart = (
+        _bars = (
             alt.Chart(_shown)
-            .mark_bar()
+            .mark_bar(opacity=0.84)
             .encode(
                 x=alt.X(
                     f"{_rate_column}:Q",
                     title=f"{metric_label(metric).title()} match rate",
                     scale=alt.Scale(domain=[0, _rate_upper]),
-                    axis=alt.Axis(format=".0%"),
+                    axis=_rate_axis(),
                 ),
                 y=alt.Y(
                     "display_label:N",
@@ -392,20 +509,36 @@ def helpers(alt, pd, pl, pycountry, re):
                     "country_scope:N",
                     title="Country scope",
                     scale=alt.Scale(domain=_scope_order, range=color_range),
+                    legend=alt.Legend(orient="bottom", direction="horizontal"),
                 ),
                 tooltip=_chart_tooltips(metric, include_scope=True),
             )
+        )
+        _chart = (
+            _add_reference_rules(_bars, reference_rates, _rate_upper)
             .properties(
                 width="container",
                 height=max(300, len(_category_order) * 28),
-                title=alt.TitleParams(text=title, anchor="start"),
+                title=alt.TitleParams(
+                    text=title,
+                    subtitle=_reference_subtitle(reference_rates),
+                    anchor="start",
+                    subtitleColor="#4B5563",
+                    subtitlePadding=6,
+                ),
             )
             .configure_view(stroke=None)
         )
         return _chart, _shown
 
-    def make_seniority_rate_chart(summary, title, metric, color_range):
-        """Plot seniority on the x-axis in numeric order for each country scope."""
+    def make_seniority_rate_chart(
+        summary,
+        title,
+        metric,
+        color_range,
+        reference_rates,
+    ):
+        """Plot seniority as grouped horizontal bars in numeric order."""
 
         _rate_column, _, _high_column, _ = metric_columns(metric)
         _shown = summary.loc[summary["group_value"] != MISSING_LABEL].copy()
@@ -429,44 +562,66 @@ def helpers(alt, pd, pl, pycountry, re):
             categories=_scope_order,
             ordered=True,
         )
+        _reference_max = reference_rates["reference_rate"].max(skipna=True)
         _rate_upper = min(
             1.0,
-            max(float(_shown[_high_column].max()) * 1.08, 0.01),
+            max(
+                float(_shown[_high_column].max()) * 1.08,
+                float(_reference_max) * 1.08,
+                0.01,
+            ),
         )
-        _chart = (
+        _bars = (
             alt.Chart(_shown)
-            .mark_bar()
+            .mark_bar(opacity=0.84)
             .encode(
                 x=alt.X(
-                    "display_label:O",
-                    sort=_category_order,
-                    title="Seniority level",
-                    axis=alt.Axis(labelAngle=0),
-                ),
-                y=alt.Y(
                     f"{_rate_column}:Q",
                     title=f"{metric_label(metric).title()} match rate",
                     scale=alt.Scale(domain=[0, _rate_upper]),
-                    axis=alt.Axis(format=".0%"),
+                    axis=_rate_axis(),
                 ),
-                xOffset=alt.XOffset("country_scope:N", sort=_scope_order),
+                y=alt.Y(
+                    "display_label:O",
+                    sort=_category_order,
+                    title="Seniority level",
+                    axis=alt.Axis(labelPadding=6),
+                ),
+                yOffset=alt.YOffset("country_scope:N", sort=_scope_order),
                 color=alt.Color(
                     "country_scope:N",
                     title="Country scope",
                     scale=alt.Scale(domain=_scope_order, range=color_range),
+                    legend=alt.Legend(orient="bottom", direction="horizontal"),
                 ),
                 tooltip=_chart_tooltips(metric, include_scope=True),
             )
+        )
+        _chart = (
+            _add_reference_rules(_bars, reference_rates, _rate_upper)
             .properties(
                 width="container",
-                height=400,
-                title=alt.TitleParams(text=title, anchor="start"),
+                height=max(300, len(_category_order) * 34),
+                title=alt.TitleParams(
+                    text=title,
+                    subtitle=_reference_subtitle(reference_rates),
+                    anchor="start",
+                    subtitleColor="#4B5563",
+                    subtitlePadding=6,
+                ),
             )
             .configure_view(stroke=None)
         )
         return _chart, _shown
 
-    def make_single_rate_chart(summary, title, metric, top_n, color):
+    def make_single_rate_chart(
+        summary,
+        title,
+        metric,
+        top_n,
+        color,
+        reference_rates,
+    ):
         """Select large categories, then rank their bars by the selected rate."""
 
         _rate_column, _, _high_column, _ = metric_columns(metric)
@@ -488,19 +643,24 @@ def helpers(alt, pd, pl, pycountry, re):
         if _shown.empty:
             return None, _shown
         _order = _shown["display_label"].tolist()
+        _reference_max = reference_rates["reference_rate"].max(skipna=True)
         _rate_upper = min(
             1.0,
-            max(float(_shown[_high_column].max()) * 1.08, 0.01),
+            max(
+                float(_shown[_high_column].max()) * 1.08,
+                float(_reference_max) * 1.08,
+                0.01,
+            ),
         )
-        _chart = (
+        _bars = (
             alt.Chart(_shown)
-            .mark_bar(color=color)
+            .mark_bar(color=color, opacity=0.86)
             .encode(
                 x=alt.X(
                     f"{_rate_column}:Q",
                     title=f"{metric_label(metric).title()} match rate",
                     scale=alt.Scale(domain=[0, _rate_upper]),
-                    axis=alt.Axis(format=".0%"),
+                    axis=_rate_axis(),
                 ),
                 y=alt.Y(
                     "display_label:N",
@@ -510,10 +670,19 @@ def helpers(alt, pd, pl, pycountry, re):
                 ),
                 tooltip=_chart_tooltips(metric),
             )
+        )
+        _chart = (
+            _add_reference_rules(_bars, reference_rates, _rate_upper)
             .properties(
                 width="container",
                 height=max(300, len(_shown) * 25),
-                title=alt.TitleParams(text=title, anchor="start"),
+                title=alt.TitleParams(
+                    text=title,
+                    subtitle=_reference_subtitle(reference_rates),
+                    anchor="start",
+                    subtitleColor="#4B5563",
+                    subtitlePadding=6,
+                ),
             )
             .configure_view(stroke=None)
         )
@@ -545,7 +714,7 @@ def helpers(alt, pd, pl, pycountry, re):
                     f"{_rate_column}:Q",
                     title=f"{metric_label(metric).title()} match rate",
                     scale=alt.Scale(domain=[0, _rate_upper]),
-                    axis=alt.Axis(format=".0%"),
+                    axis=_rate_axis(),
                 ),
                 color=alt.Color(
                     "country_scope:N",
@@ -580,6 +749,129 @@ def helpers(alt, pd, pl, pycountry, re):
             .configure_view(stroke=None)
         )
         return _chart, _shown
+
+    def make_industry_occupation_heatmap(
+        summary,
+        industry_order,
+        occupation_order,
+        industry_title,
+        occupation_title,
+        metric,
+        scope_label,
+    ):
+        """Plot match rates and metric-consistent counts over a complete cell grid."""
+
+        if summary.empty:
+            return None
+        _valid = summary.dropna(subset=["match_rate"]).copy()
+        _color_max = (
+            max(float(_valid["match_rate"].max()), 0.01) if not _valid.empty else 0.01
+        )
+        _text_threshold = _color_max * 0.55
+        _candidate_title = (
+            "Candidate user-company observations"
+            if metric == "spell"
+            else "Candidate users"
+        )
+        _matched_title = (
+            "Matched user-company observations"
+            if metric == "spell"
+            else "Matched users"
+        )
+        _x = alt.X(
+            "industry_label:N",
+            sort=industry_order,
+            title=industry_title,
+            axis=alt.Axis(labelAngle=-25, labelLimit=260, labelPadding=8),
+        )
+        _y = alt.Y(
+            "occupation_label:N",
+            sort=occupation_order,
+            title=occupation_title,
+            axis=alt.Axis(labelLimit=360, labelPadding=8),
+        )
+        _tooltips = [
+            alt.Tooltip("industry_label:N", title="Industry"),
+            alt.Tooltip("occupation_label:N", title="Occupation"),
+            alt.Tooltip("candidate_count:Q", title=_candidate_title, format=","),
+            alt.Tooltip("matched_count:Q", title=_matched_title, format=","),
+            alt.Tooltip("match_rate:Q", title="Match rate", format=".2%"),
+            alt.Tooltip("ci_low:Q", title="95% CI lower", format=".2%"),
+            alt.Tooltip("ci_high:Q", title="95% CI upper", format=".2%"),
+        ]
+        _base = (
+            alt.Chart(summary)
+            .mark_rect(color="#F3F4F6", stroke="#FFFFFF", strokeWidth=1.5)
+            .encode(x=_x, y=_y, tooltip=_tooltips)
+        )
+        _colored_cells = (
+            alt.Chart(_valid)
+            .mark_rect(stroke="#FFFFFF", strokeWidth=1.5)
+            .encode(
+                x=_x,
+                y=_y,
+                color=alt.Color(
+                    "match_rate:Q",
+                    title="Match rate",
+                    scale=alt.Scale(
+                        domain=[0.0, _color_max],
+                        scheme="blues",
+                    ),
+                    legend=alt.Legend(format=".1%"),
+                ),
+                tooltip=_tooltips,
+            )
+        )
+        _rate_labels = (
+            alt.Chart(_valid)
+            .mark_text(dy=-8, fontSize=12, fontWeight=600)
+            .encode(
+                x=_x,
+                y=_y,
+                text=alt.Text("match_rate:Q", format=".1%"),
+                color=alt.condition(
+                    f"datum.match_rate >= {_text_threshold}",
+                    alt.value("#FFFFFF"),
+                    alt.value("#111827"),
+                ),
+            )
+        )
+        _count_labels = (
+            alt.Chart(summary)
+            .mark_text(dy=10, fontSize=10)
+            .encode(
+                x=_x,
+                y=_y,
+                text=alt.Text("count_label:N"),
+                color=alt.condition(
+                    f"datum.match_rate >= {_text_threshold}",
+                    alt.value("#FFFFFF"),
+                    alt.value("#4B5563"),
+                ),
+                tooltip=_tooltips,
+            )
+        )
+        return (
+            alt.layer(_base, _colored_cells, _rate_labels, _count_labels)
+            .properties(
+                width="container",
+                height=max(360, len(occupation_order) * 70),
+                title=alt.TitleParams(
+                    text=(
+                        f"Inventor {metric_label(metric)}-level match rates across "
+                        "industry-occupation cells"
+                    ),
+                    subtitle=(
+                        f"Country scope: {scope_label}. Cell labels report match rate "
+                        "and matched / candidate counts."
+                    ),
+                    anchor="start",
+                    subtitleColor="#4B5563",
+                    subtitlePadding=6,
+                ),
+            )
+            .configure_view(stroke=None)
+        )
 
     def country_iso3(country_name):
         """Map common Revelio country labels to ISO alpha-3 codes."""
@@ -681,6 +973,7 @@ def helpers(alt, pd, pl, pycountry, re):
     return (
         METRIC_OPTIONS,
         MISSING_LABEL,
+        RATE_TABLE_FORMATS,
         SCOPE_OPTIONS,
         US_LABEL,
         available_countries,
@@ -689,18 +982,20 @@ def helpers(alt, pd, pl, pycountry, re):
         grouped_match_rates,
         hierarchy_number,
         make_grouped_rate_chart,
+        make_industry_occupation_heatmap,
         make_seniority_rate_chart,
         make_single_rate_chart,
         make_time_chart,
         metric_columns,
         metric_label,
+        reference_match_rates,
         sample_statistics,
         scoped_classification_match_rates,
         us_state_code,
     )
 
 
-@app.cell()
+@app.cell
 def paths_and_schema(ds, hierarchy_number, mo):
     INPUT_DIR = (
         mo.notebook_location().parents[1]
@@ -777,11 +1072,10 @@ def paths_and_schema(ds, hierarchy_number, mo):
         CROSSWALK_PATH,
         DATE_COLUMN,
         INPUT_DIR,
-        PARQUET_FILES,
     )
 
 
-@app.cell()
+@app.cell
 def load_data(
     ANALYSIS_COLUMNS,
     CROSSWALK_PATH,
@@ -861,8 +1155,12 @@ def load_data(
     return fnh, link_diagnostics
 
 
-@app.cell()
-def classifications(AVAILABLE_RICS_COLUMNS, AVAILABLE_ROLE_COLUMNS, hierarchy_number):
+@app.cell
+def classifications(
+    AVAILABLE_RICS_COLUMNS,
+    AVAILABLE_ROLE_COLUMNS,
+    hierarchy_number,
+):
     OCCUPATION_LABELS = {
         "onet_code": "O*NET code and title",
         **{
@@ -891,14 +1189,10 @@ def classifications(AVAILABLE_RICS_COLUMNS, AVAILABLE_ROLE_COLUMNS, hierarchy_nu
     )
 
 
-# -----------------------------------------------------------------------------
-# Section 1. Basic numbers
-# -----------------------------------------------------------------------------
-
-
-@app.cell()
+@app.cell
 def basic_numbers(
     MISSING_LABEL,
+    RATE_TABLE_FORMATS,
     US_LABEL,
     available_countries,
     fnh,
@@ -951,7 +1245,7 @@ def basic_numbers(
                 basic_numbers_table,
                 pagination=False,
                 show_column_summaries=False,
-                format_mapping={"Match rate": "0.00%"},
+                format_mapping=RATE_TABLE_FORMATS,
             ),
             mo.accordion(
                 {
@@ -972,17 +1266,17 @@ def basic_numbers(
         ],
         gap=1,
     )
-    return basic_numbers_table
+    return
 
 
-# -----------------------------------------------------------------------------
-# Section 2. Match rates across different occupations
-# -----------------------------------------------------------------------------
-
-
-@app.cell()
+@app.cell
 def occupation_controls(
-    METRIC_OPTIONS, OCCUPATION_LABELS, SCOPE_OPTIONS, available_countries, fnh, mo
+    METRIC_OPTIONS,
+    OCCUPATION_LABELS,
+    SCOPE_OPTIONS,
+    available_countries,
+    fnh,
+    mo,
 ):
     occupation_metric_selector = mo.ui.dropdown(
         options=METRIC_OPTIONS,
@@ -1008,20 +1302,15 @@ def occupation_controls(
         label="Country scope for the table",
         full_width=True,
     )
-    occupation_show_table = mo.ui.checkbox(
-        value=False,
-        label="Display the occupation table",
-    )
     return (
         occupation_country_selector,
         occupation_metric_selector,
         occupation_selector,
-        occupation_show_table,
         occupation_table_scope_selector,
     )
 
 
-@app.cell()
+@app.cell
 def occupation_top_n_control(MISSING_LABEL, fnh, mo, occupation_selector, pl):
     _occupation_column = occupation_selector.value
     _category_count = int(
@@ -1044,10 +1333,10 @@ def occupation_top_n_control(MISSING_LABEL, fnh, mo, occupation_selector, pl):
         label="Number of occupation categories in the bar chart",
         full_width=True,
     )
-    return occupation_top_n_selector
+    return (occupation_top_n_selector,)
 
 
-@app.cell()
+@app.cell
 def occupation_rates(
     OCCUPATION_LABELS,
     OCCUPATION_TITLES,
@@ -1059,6 +1348,7 @@ def occupation_rates(
     occupation_selector,
     occupation_table_scope_selector,
     occupation_top_n_selector,
+    reference_match_rates,
     scoped_classification_match_rates,
 ):
     occupation_column = occupation_selector.value
@@ -1070,7 +1360,12 @@ def occupation_rates(
         OCCUPATION_TITLES.get(occupation_column),
         occupation_country_selector.value,
     )
-    occupation_chart, _occupation_display = make_grouped_rate_chart(
+    occupation_reference_table = reference_match_rates(
+        fnh,
+        occupation_metric,
+        occupation_country_selector.value,
+    )
+    occupation_chart, occupation_plot_table = make_grouped_rate_chart(
         occupation_summary,
         (
             f"Inventor {metric_label(occupation_metric)}-level match rates by "
@@ -1079,6 +1374,11 @@ def occupation_rates(
         occupation_metric,
         occupation_top_n_selector.value,
         ["#2563EB", "#0F766E", "#B45309"],
+        occupation_reference_table,
+    )
+    occupation_plot_table = occupation_plot_table.drop(
+        columns=["scope_key"],
+        errors="ignore",
     )
     occupation_table = occupation_summary.loc[
         occupation_summary["scope_key"] == occupation_table_scope_selector.value
@@ -1092,20 +1392,23 @@ def occupation_rates(
     return (
         occupation_chart,
         occupation_note,
-        occupation_summary,
+        occupation_plot_table,
+        occupation_reference_table,
         occupation_table,
     )
 
 
-@app.cell()
+@app.cell
 def occupation_output(
+    RATE_TABLE_FORMATS,
     mo,
     occupation_chart,
     occupation_country_selector,
     occupation_metric_selector,
     occupation_note,
+    occupation_plot_table,
+    occupation_reference_table,
     occupation_selector,
-    occupation_show_table,
     occupation_table,
     occupation_table_scope_selector,
     occupation_top_n_selector,
@@ -1118,21 +1421,20 @@ def occupation_output(
             kind="warn",
         )
     )
-    _table_output = mo.md("")
-    if occupation_show_table.value:
-        _table_output = mo.vstack(
-            [
-                occupation_table_scope_selector,
-                mo.ui.table(
-                    occupation_table,
-                    pagination=True,
-                    page_size=20,
-                    selection="multi",
-                    show_column_summaries=False,
-                ),
-            ],
-            gap=1,
-        )
+    _all_categories_table = mo.vstack(
+        [
+            occupation_table_scope_selector,
+            mo.ui.table(
+                occupation_table,
+                pagination=True,
+                page_size=20,
+                selection="multi",
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+        ],
+        gap=1,
+    )
     mo.vstack(
         [
             mo.md("## 2. Match rates across different occupations"),
@@ -1148,7 +1450,25 @@ def occupation_output(
             ),
             _figure,
             mo.accordion(
-                {"Occupation table (select rows and country scope)": _table_output}
+                {
+                    "View statistics plotted in the figure": mo.ui.table(
+                        occupation_plot_table,
+                        pagination=True,
+                        page_size=20,
+                        selection="multi",
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    ),
+                    "View reference match rates": mo.ui.table(
+                        occupation_reference_table,
+                        pagination=False,
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    ),
+                    "View all occupation statistics by country scope": (
+                        _all_categories_table
+                    ),
+                }
             ),
         ],
         gap=1,
@@ -1156,20 +1476,20 @@ def occupation_output(
     return
 
 
-# -----------------------------------------------------------------------------
-# Section 3. Match rates across different industries
-# -----------------------------------------------------------------------------
+@app.cell
+def _():
+    return
 
 
-@app.cell()
+@app.cell
 def industry_controls(
+    DEFAULT_INDUSTRY,
     INDUSTRY_LABELS,
     METRIC_OPTIONS,
     SCOPE_OPTIONS,
     available_countries,
     fnh,
     mo,
-    DEFAULT_INDUSTRY,
 ):
     industry_metric_selector = mo.ui.dropdown(
         options=METRIC_OPTIONS,
@@ -1195,20 +1515,15 @@ def industry_controls(
         label="Country scope for the table",
         full_width=True,
     )
-    industry_show_table = mo.ui.checkbox(
-        value=False,
-        label="Display the industry table",
-    )
     return (
         industry_country_selector,
         industry_metric_selector,
         industry_selector,
-        industry_show_table,
         industry_table_scope_selector,
     )
 
 
-@app.cell()
+@app.cell
 def industry_top_n_control(MISSING_LABEL, fnh, industry_selector, mo, pl):
     _industry_column = industry_selector.value
     _category_count = int(
@@ -1226,10 +1541,10 @@ def industry_top_n_control(MISSING_LABEL, fnh, industry_selector, mo, pl):
         label="Number of industry categories in the bar chart",
         full_width=True,
     )
-    return industry_top_n_selector
+    return (industry_top_n_selector,)
 
 
-@app.cell()
+@app.cell
 def industry_rates(
     INDUSTRY_LABELS,
     INDUSTRY_TITLES,
@@ -1241,6 +1556,7 @@ def industry_rates(
     industry_top_n_selector,
     make_grouped_rate_chart,
     metric_label,
+    reference_match_rates,
     scoped_classification_match_rates,
 ):
     industry_column = industry_selector.value
@@ -1252,7 +1568,12 @@ def industry_rates(
         INDUSTRY_TITLES.get(industry_column),
         industry_country_selector.value,
     )
-    industry_chart, _industry_display = make_grouped_rate_chart(
+    industry_reference_table = reference_match_rates(
+        fnh,
+        industry_metric,
+        industry_country_selector.value,
+    )
+    industry_chart, industry_plot_table = make_grouped_rate_chart(
         industry_summary,
         (
             f"Inventor {metric_label(industry_metric)}-level match rates by "
@@ -1261,6 +1582,11 @@ def industry_rates(
         industry_metric,
         industry_top_n_selector.value,
         ["#B45309", "#2563EB", "#0F766E"],
+        industry_reference_table,
+    )
+    industry_plot_table = industry_plot_table.drop(
+        columns=["scope_key"],
+        errors="ignore",
     )
     industry_table = industry_summary.loc[
         industry_summary["scope_key"] == industry_table_scope_selector.value
@@ -1271,17 +1597,25 @@ def industry_rates(
         "bars are ranked by the selected all-country match rate. The selected countries "
         "replace, rather than add to, the non-U.S. series."
     )
-    return industry_chart, industry_note, industry_summary, industry_table
+    return (
+        industry_chart,
+        industry_note,
+        industry_plot_table,
+        industry_reference_table,
+        industry_table,
+    )
 
 
-@app.cell()
+@app.cell
 def industry_output(
+    RATE_TABLE_FORMATS,
     industry_chart,
     industry_country_selector,
     industry_metric_selector,
     industry_note,
+    industry_plot_table,
+    industry_reference_table,
     industry_selector,
-    industry_show_table,
     industry_table,
     industry_table_scope_selector,
     industry_top_n_selector,
@@ -1295,21 +1629,20 @@ def industry_output(
             kind="warn",
         )
     )
-    _table_output = mo.md("")
-    if industry_show_table.value:
-        _table_output = mo.vstack(
-            [
-                industry_table_scope_selector,
-                mo.ui.table(
-                    industry_table,
-                    pagination=True,
-                    page_size=20,
-                    selection="multi",
-                    show_column_summaries=False,
-                ),
-            ],
-            gap=1,
-        )
+    _all_categories_table = mo.vstack(
+        [
+            industry_table_scope_selector,
+            mo.ui.table(
+                industry_table,
+                pagination=True,
+                page_size=20,
+                selection="multi",
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+        ],
+        gap=1,
+    )
     mo.vstack(
         [
             mo.md("## 3. Match rates across different industries"),
@@ -1325,7 +1658,25 @@ def industry_output(
             ),
             _figure,
             mo.accordion(
-                {"Industry table (select rows and country scope)": _table_output}
+                {
+                    "View statistics plotted in the figure": mo.ui.table(
+                        industry_plot_table,
+                        pagination=True,
+                        page_size=20,
+                        selection="multi",
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    ),
+                    "View reference match rates": mo.ui.table(
+                        industry_reference_table,
+                        pagination=False,
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    ),
+                    "View all industry statistics by country scope": (
+                        _all_categories_table
+                    ),
+                }
             ),
         ],
         gap=1,
@@ -1333,12 +1684,467 @@ def industry_output(
     return
 
 
-# -----------------------------------------------------------------------------
-# Section 4. Other results
-# -----------------------------------------------------------------------------
+@app.cell
+def industry_occupation_controls(
+    DEFAULT_INDUSTRY,
+    INDUSTRY_LABELS,
+    METRIC_OPTIONS,
+    OCCUPATION_LABELS,
+    SCOPE_OPTIONS,
+    available_countries,
+    fnh,
+    mo,
+):
+    io_industry_variable_selector = mo.ui.dropdown(
+        options={_label: _column for _column, _label in INDUSTRY_LABELS.items()},
+        value=INDUSTRY_LABELS[DEFAULT_INDUSTRY],
+        label="Industry classification",
+        full_width=True,
+    )
+    io_occupation_variable_selector = mo.ui.dropdown(
+        options={_label: _column for _column, _label in OCCUPATION_LABELS.items()},
+        value=OCCUPATION_LABELS["onet_code"],
+        label="Occupation classification",
+        full_width=True,
+    )
+    io_country_scope_selector = mo.ui.dropdown(
+        options=SCOPE_OPTIONS,
+        value="All countries",
+        label="Country scope",
+        full_width=True,
+    )
+    io_custom_country_selector = mo.ui.multiselect(
+        options=available_countries(fnh),
+        value=[],
+        label="Countries used when the country scope is Selected countries",
+        full_width=True,
+    )
+    io_metric_selector = mo.ui.dropdown(
+        options=METRIC_OPTIONS,
+        value="User-company level",
+        label="Match-rate definition",
+        full_width=True,
+    )
+    return (
+        io_country_scope_selector,
+        io_custom_country_selector,
+        io_industry_variable_selector,
+        io_metric_selector,
+        io_occupation_variable_selector,
+    )
 
 
-@app.cell()
+@app.cell
+def industry_occupation_category_controls(
+    INDUSTRY_LABELS,
+    INDUSTRY_TITLES,
+    MISSING_LABEL,
+    OCCUPATION_LABELS,
+    OCCUPATION_TITLES,
+    classification_match_rates,
+    fnh,
+    io_industry_variable_selector,
+    io_occupation_variable_selector,
+    mo,
+):
+    io_industry_column = io_industry_variable_selector.value
+    io_occupation_column = io_occupation_variable_selector.value
+    io_industry_title = INDUSTRY_LABELS[io_industry_column]
+    io_occupation_title = OCCUPATION_LABELS[io_occupation_column]
+
+    _industry_title_column = INDUSTRY_TITLES.get(io_industry_column)
+    _occupation_title_column = OCCUPATION_TITLES.get(io_occupation_column)
+    io_industry_category_table = classification_match_rates(
+        fnh,
+        io_industry_column,
+        _industry_title_column,
+    )
+    io_industry_category_table = io_industry_category_table.loc[
+        io_industry_category_table["group_value"] != MISSING_LABEL
+    ].copy()
+    io_occupation_category_table = classification_match_rates(
+        fnh,
+        io_occupation_column,
+        _occupation_title_column,
+    )
+    io_occupation_category_table = io_occupation_category_table.loc[
+        io_occupation_category_table["group_value"] != MISSING_LABEL
+    ].copy()
+
+    _industry_options = dict(
+        zip(
+            io_industry_category_table["display_label"],
+            io_industry_category_table["group_value"],
+            strict=True,
+        )
+    )
+    _occupation_options = dict(
+        zip(
+            io_occupation_category_table["display_label"],
+            io_occupation_category_table["group_value"],
+            strict=True,
+        )
+    )
+    _industry_label_by_value = dict(
+        zip(
+            io_industry_category_table["group_value"],
+            io_industry_category_table["display_label"],
+            strict=True,
+        )
+    )
+    _default_industry_values = (
+        [
+            "Biotechnology and Life Sciences",
+            "Pharmaceutical Manufacturing",
+            "Pharmaceuticals",
+        ]
+        if io_industry_column == "rics_k400"
+        else io_industry_category_table.head(3)["group_value"].tolist()
+    )
+    _default_industry_labels = [
+        _industry_label_by_value[_value]
+        for _value in _default_industry_values
+        if _value in _industry_label_by_value
+    ]
+    if not _default_industry_labels:
+        _default_industry_labels = io_industry_category_table.head(3)[
+            "display_label"
+        ].tolist()
+
+    _default_occupation_titles = [
+        "Microbiologists",
+        "Chemical Engineers",
+        "Bioengineers and Biomedical Engineers",
+        "Biochemists and Biophysicists",
+        "Chemists",
+        "Animal Scientists",
+    ]
+    if io_occupation_column == "onet_code":
+        _default_occupation_labels = []
+        for _title in _default_occupation_titles:
+            _matches = io_occupation_category_table.loc[
+                io_occupation_category_table[_occupation_title_column] == _title,
+                "display_label",
+            ]
+            if not _matches.empty:
+                _default_occupation_labels.append(_matches.iloc[0])
+    else:
+        _default_occupation_labels = io_occupation_category_table.head(6)[
+            "display_label"
+        ].tolist()
+    if not _default_occupation_labels:
+        _default_occupation_labels = io_occupation_category_table.head(6)[
+            "display_label"
+        ].tolist()
+
+    io_industry_values_selector = mo.ui.multiselect(
+        options=_industry_options,
+        value=_default_industry_labels,
+        label="Industries shown on the x-axis",
+        full_width=True,
+    )
+    io_occupation_values_selector = mo.ui.multiselect(
+        options=_occupation_options,
+        value=_default_occupation_labels,
+        label="Occupations shown on the y-axis",
+        full_width=True,
+    )
+    return (
+        io_industry_category_table,
+        io_industry_column,
+        io_industry_title,
+        io_industry_values_selector,
+        io_occupation_category_table,
+        io_occupation_column,
+        io_occupation_title,
+        io_occupation_values_selector,
+    )
+
+
+@app.cell
+def industry_occupation_rates(
+    MISSING_LABEL,
+    SCOPE_OPTIONS,
+    US_LABEL,
+    fnh,
+    grouped_match_rates,
+    io_country_scope_selector,
+    io_custom_country_selector,
+    io_industry_category_table,
+    io_industry_column,
+    io_industry_title,
+    io_industry_values_selector,
+    io_metric_selector,
+    io_occupation_category_table,
+    io_occupation_column,
+    io_occupation_title,
+    io_occupation_values_selector,
+    make_industry_occupation_heatmap,
+    metric_columns,
+    metric_label,
+    pd,
+    pl,
+    sample_statistics,
+):
+    _industry_values = [str(_value) for _value in io_industry_values_selector.value]
+    _occupation_values = [str(_value) for _value in io_occupation_values_selector.value]
+    _scope_key = io_country_scope_selector.value
+    _custom_countries = tuple(io_custom_country_selector.value or ())
+    _scope_labels = {_value: _label for _label, _value in SCOPE_OPTIONS.items()}
+    _scope_label = _scope_labels[_scope_key]
+    if _scope_key == "custom":
+        _scope_label = (
+            "Selected countries: " + ", ".join(_custom_countries)
+            if _custom_countries
+            else "Selected countries: none"
+        )
+
+    _scope_data = fnh
+    if _scope_key == "us":
+        _scope_data = fnh.filter(pl.col("country") == US_LABEL)
+    elif _scope_key == "non_us":
+        _scope_data = fnh.filter(
+            (pl.col("country") != US_LABEL) & (pl.col("country") != MISSING_LABEL)
+        )
+    elif _scope_key == "custom":
+        _scope_data = fnh.filter(pl.col("country").is_in(_custom_countries))
+
+    industry_occupation_heatmap = None
+    industry_occupation_table = pd.DataFrame(
+        columns=[
+            "Industry",
+            "Occupation",
+            "Candidate observations",
+            "Matched observations",
+            "Match rate",
+            "95% CI lower",
+            "95% CI upper",
+        ]
+    )
+    industry_occupation_totals = pd.DataFrame(
+        columns=[
+            "Country scope",
+            "Observation level",
+            "Selected industries",
+            "Selected occupations",
+            "Populated cells",
+            "Candidate observations",
+            "Matched observations",
+            "Match rate",
+        ]
+    )
+    industry_occupation_note = (
+        "Select at least one industry and one occupation to construct the heatmap."
+    )
+    if _industry_values and _occupation_values:
+        _cell_data = _scope_data.filter(
+            pl.col(io_industry_column).cast(pl.String).is_in(_industry_values)
+            & pl.col(io_occupation_column).cast(pl.String).is_in(_occupation_values)
+        )
+        _summary = grouped_match_rates(
+            _cell_data,
+            [io_industry_column, io_occupation_column],
+        ).rename(
+            columns={
+                io_industry_column: "industry_value",
+                io_occupation_column: "occupation_value",
+            }
+        )
+        if not _summary.empty:
+            _summary["industry_value"] = _summary["industry_value"].astype("string")
+            _summary["occupation_value"] = _summary["occupation_value"].astype("string")
+
+        _grid = pd.MultiIndex.from_product(
+            [_industry_values, _occupation_values],
+            names=["industry_value", "occupation_value"],
+        ).to_frame(index=False)
+        _grid = _grid.merge(
+            _summary,
+            on=["industry_value", "occupation_value"],
+            how="left",
+        )
+        _count_columns = [
+            "candidate_spells",
+            "matched_spells",
+            "unique_users",
+            "matched_users",
+        ]
+        _grid[_count_columns] = _grid[_count_columns].fillna(0).astype("int64")
+
+        _industry_labels = dict(
+            zip(
+                io_industry_category_table["group_value"].astype(str),
+                io_industry_category_table["display_label"],
+                strict=True,
+            )
+        )
+        _occupation_labels = dict(
+            zip(
+                io_occupation_category_table["group_value"].astype(str),
+                io_occupation_category_table["display_label"],
+                strict=True,
+            )
+        )
+        _grid["industry_label"] = _grid["industry_value"].map(_industry_labels)
+        _grid["occupation_label"] = _grid["occupation_value"].map(_occupation_labels)
+        _industry_order = [
+            _industry_labels.get(_value, _value) for _value in _industry_values
+        ]
+        _occupation_order = [
+            _occupation_labels.get(_value, _value) for _value in _occupation_values
+        ]
+
+        _metric = io_metric_selector.value
+        _rate_column, _low_column, _high_column, _matched_column = metric_columns(
+            _metric
+        )
+        _candidate_column = "candidate_spells" if _metric == "spell" else "unique_users"
+        _grid["candidate_count"] = _grid[_candidate_column]
+        _grid["matched_count"] = _grid[_matched_column]
+        _grid["match_rate"] = _grid[_rate_column]
+        _grid["ci_low"] = _grid[_low_column]
+        _grid["ci_high"] = _grid[_high_column]
+        _grid["count_label"] = (
+            _grid["matched_count"].map("{:,}".format)
+            + " / "
+            + _grid["candidate_count"].map("{:,}".format)
+        )
+        industry_occupation_heatmap = make_industry_occupation_heatmap(
+            _grid,
+            _industry_order,
+            _occupation_order,
+            io_industry_title,
+            io_occupation_title,
+            _metric,
+            _scope_label,
+        )
+        industry_occupation_table = _grid[
+            [
+                "industry_label",
+                "occupation_label",
+                "candidate_count",
+                "matched_count",
+                "match_rate",
+                "ci_low",
+                "ci_high",
+            ]
+        ].rename(
+            columns={
+                "industry_label": "Industry",
+                "occupation_label": "Occupation",
+                "candidate_count": "Candidate observations",
+                "matched_count": "Matched observations",
+                "match_rate": "Match rate",
+                "ci_low": "95% CI lower",
+                "ci_high": "95% CI upper",
+            }
+        )
+
+        _total_statistics = sample_statistics(_cell_data)
+        _total_candidate_key = (
+            "candidate_spells" if _metric == "spell" else "unique_users"
+        )
+        _total_matched_key = "matched_spells" if _metric == "spell" else "matched_users"
+        _total_rate_key = (
+            "spell_match_rate" if _metric == "spell" else "user_match_rate"
+        )
+        industry_occupation_totals = pd.DataFrame(
+            [
+                {
+                    "Country scope": _scope_label,
+                    "Observation level": metric_label(_metric).title(),
+                    "Selected industries": len(_industry_values),
+                    "Selected occupations": len(_occupation_values),
+                    "Populated cells": int((_grid["candidate_count"] > 0).sum()),
+                    "Candidate observations": _total_statistics[_total_candidate_key],
+                    "Matched observations": _total_statistics[_total_matched_key],
+                    "Match rate": _total_statistics[_total_rate_key],
+                }
+            ]
+        )
+        industry_occupation_note = (
+            "Each cell reports matched / candidate observations for the selected match-rate "
+            "definition. Gray cells have no candidate observations."
+        )
+        if _metric == "user":
+            industry_occupation_note += (
+                " A user appearing in multiple industry-occupation cells is distinct within "
+                "each cell but counted once in the pooled total below."
+            )
+    return (
+        industry_occupation_heatmap,
+        industry_occupation_note,
+        industry_occupation_table,
+        industry_occupation_totals,
+    )
+
+
+@app.cell
+def industry_occupation_output(
+    RATE_TABLE_FORMATS,
+    industry_occupation_heatmap,
+    industry_occupation_note,
+    industry_occupation_table,
+    industry_occupation_totals,
+    io_country_scope_selector,
+    io_custom_country_selector,
+    io_industry_values_selector,
+    io_industry_variable_selector,
+    io_metric_selector,
+    io_occupation_values_selector,
+    io_occupation_variable_selector,
+    mo,
+):
+    _figure = (
+        industry_occupation_heatmap
+        if industry_occupation_heatmap is not None
+        else mo.callout(
+            mo.md("Select at least one industry and one occupation."),
+            kind="warn",
+        )
+    )
+    mo.vstack(
+        [
+            mo.md("## 4. Match rates across industry-occupation cells"),
+            mo.md(
+                "Select the two classifications, displayed categories, country scope, and "
+                "match-rate definition. Heatmap cells show the rate and matched / candidate "
+                "counts."
+            ),
+            io_industry_variable_selector,
+            io_industry_values_selector,
+            io_occupation_variable_selector,
+            io_occupation_values_selector,
+            io_country_scope_selector,
+            io_custom_country_selector,
+            io_metric_selector,
+            _figure,
+            mo.md(industry_occupation_note),
+            mo.ui.table(
+                industry_occupation_totals,
+                pagination=False,
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+            mo.accordion(
+                {
+                    "View industry-occupation cell statistics": mo.ui.table(
+                        industry_occupation_table,
+                        pagination=True,
+                        page_size=20,
+                        selection="multi",
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
+
+
+@app.cell
 def country_controls(METRIC_OPTIONS, MISSING_LABEL, fnh, mo, pl):
     _country_count = int(
         fnh.filter(pl.col("country") != MISSING_LABEL)
@@ -1360,14 +2166,10 @@ def country_controls(METRIC_OPTIONS, MISSING_LABEL, fnh, mo, pl):
         label="Number of countries in the bar chart",
         full_width=True,
     )
-    country_show_table = mo.ui.checkbox(
-        value=False,
-        label="Display the country table",
-    )
-    return country_metric_selector, country_show_table, country_top_n_selector
+    return country_metric_selector, country_top_n_selector
 
 
-@app.cell()
+@app.cell
 def country_rates(
     MISSING_LABEL,
     classification_match_rates,
@@ -1379,15 +2181,18 @@ def country_rates(
     metric_columns,
     metric_label,
     px,
+    reference_match_rates,
 ):
     country_metric = country_metric_selector.value
     country_summary = classification_match_rates(fnh, "country")
-    country_chart, _country_display = make_single_rate_chart(
+    country_reference_table = reference_match_rates(fnh, country_metric)
+    country_chart, country_plot_table = make_single_rate_chart(
         country_summary,
-        (f"Inventor {metric_label(country_metric)}-level match rates across countries"),
+        (f"Inventor {metric_label(country_metric)}-level match rates across economies"),
         country_metric,
         country_top_n_selector.value,
         "#0F766E",
+        country_reference_table,
     )
     _country_map_working = country_summary.loc[
         country_summary["group_value"] != MISSING_LABEL
@@ -1424,7 +2229,7 @@ def country_rates(
             range_color=(0.0, _color_max),
             projection="natural earth",
             title=(
-                f"Inventor {metric_label(country_metric)}-level match rates across countries"
+                f"Inventor {metric_label(country_metric)}-level match rates across economies"
             ),
         )
         country_map.update_geos(showframe=False, showcoastlines=True)
@@ -1433,15 +2238,24 @@ def country_rates(
             margin={"l": 0, "r": 0, "t": 55, "b": 0},
             coloraxis_colorbar={"tickformat": ".1%"},
         )
-    return country_chart, country_map, country_summary, unmapped_country_summary
+    return (
+        country_chart,
+        country_map,
+        country_plot_table,
+        country_reference_table,
+        country_summary,
+        unmapped_country_summary,
+    )
 
 
-@app.cell()
+@app.cell
 def country_output(
+    RATE_TABLE_FORMATS,
     country_chart,
     country_map,
     country_metric_selector,
-    country_show_table,
+    country_plot_table,
+    country_reference_table,
     country_summary,
     country_top_n_selector,
     mo,
@@ -1457,34 +2271,47 @@ def country_output(
         if country_map is not None
         else mo.callout(mo.md("No country can be mapped."), kind="warn")
     )
-    _table = mo.md("")
-    if country_show_table.value:
-        _table = mo.accordion(
-            {
-                "All country match-rate statistics": mo.ui.table(
-                    country_summary,
-                    pagination=True,
-                    page_size=20,
-                    selection="multi",
-                    show_column_summaries=False,
-                ),
-                "Country labels not mapped to ISO-3": mo.ui.table(
-                    unmapped_country_summary,
-                    pagination=True,
-                    page_size=20,
-                    show_column_summaries=False,
-                ),
-            }
-        )
+    _table = mo.accordion(
+        {
+            "View statistics plotted in the bar chart": mo.ui.table(
+                country_plot_table,
+                pagination=True,
+                page_size=20,
+                selection="multi",
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+            "View reference match rates": mo.ui.table(
+                country_reference_table,
+                pagination=False,
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+            "View all country match-rate statistics": mo.ui.table(
+                country_summary,
+                pagination=True,
+                page_size=20,
+                selection="multi",
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+            "View country labels not mapped to ISO-3": mo.ui.table(
+                unmapped_country_summary,
+                pagination=True,
+                page_size=20,
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+        }
+    )
     mo.vstack(
         [
-            mo.md("## 4. Other results"),
-            mo.md("### 4.1. Match rates across countries"),
+            mo.md("## 5. Other results"),
+            mo.md("### 5.1. Match rates across economies"),
             country_metric_selector,
             country_top_n_selector,
             _bar,
             _map,
-            country_show_table,
             _table,
         ],
         gap=1,
@@ -1492,7 +2319,7 @@ def country_output(
     return
 
 
-@app.cell()
+@app.cell
 def state_controls(METRIC_OPTIONS, mo):
     state_metric_selector = mo.ui.dropdown(
         options=METRIC_OPTIONS,
@@ -1500,14 +2327,10 @@ def state_controls(METRIC_OPTIONS, mo):
         label="Match-rate definition for U.S.-state results",
         full_width=True,
     )
-    state_show_table = mo.ui.checkbox(
-        value=False,
-        label="Display the U.S.-state table",
-    )
-    return state_metric_selector, state_show_table
+    return (state_metric_selector,)
 
 
-@app.cell()
+@app.cell
 def state_rates(
     MISSING_LABEL,
     US_LABEL,
@@ -1573,13 +2396,13 @@ def state_rates(
     return state_map, state_summary, unmapped_state_summary
 
 
-@app.cell()
+@app.cell
 def state_output(
+    RATE_TABLE_FORMATS,
+    mo,
     state_map,
     state_metric_selector,
-    state_show_table,
     state_summary,
-    mo,
     unmapped_state_summary,
 ):
     _map = (
@@ -1587,30 +2410,29 @@ def state_output(
         if state_map is not None
         else mo.callout(mo.md("No U.S. state can be mapped."), kind="warn")
     )
-    _table = mo.md("")
-    if state_show_table.value:
-        _table = mo.accordion(
-            {
-                "All U.S.-state match-rate statistics": mo.ui.table(
-                    state_summary,
-                    pagination=True,
-                    page_size=20,
-                    selection="multi",
-                    show_column_summaries=False,
-                ),
-                "State labels not mapped to USPS codes": mo.ui.table(
-                    unmapped_state_summary,
-                    pagination=True,
-                    show_column_summaries=False,
-                ),
-            }
-        )
+    _table = mo.accordion(
+        {
+            "View all U.S.-state match-rate statistics": mo.ui.table(
+                state_summary,
+                pagination=True,
+                page_size=20,
+                selection="multi",
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+            "View state labels not mapped to USPS codes": mo.ui.table(
+                unmapped_state_summary,
+                pagination=True,
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+        }
+    )
     mo.vstack(
         [
-            mo.md("### 4.2. Match rates across U.S. states"),
+            mo.md("### 5.2. Match rates across U.S. states"),
             state_metric_selector,
             _map,
-            state_show_table,
             _table,
         ],
         gap=1,
@@ -1618,8 +2440,14 @@ def state_output(
     return
 
 
-@app.cell()
-def seniority_controls(METRIC_OPTIONS, SCOPE_OPTIONS, available_countries, fnh, mo):
+@app.cell
+def seniority_controls(
+    METRIC_OPTIONS,
+    SCOPE_OPTIONS,
+    available_countries,
+    fnh,
+    mo,
+):
     seniority_metric_selector = mo.ui.dropdown(
         options=METRIC_OPTIONS,
         value="User-company level",
@@ -1638,28 +2466,24 @@ def seniority_controls(METRIC_OPTIONS, SCOPE_OPTIONS, available_countries, fnh, 
         label="Country scope for the seniority table",
         full_width=True,
     )
-    seniority_show_table = mo.ui.checkbox(
-        value=False,
-        label="Display the seniority table",
-    )
     return (
         seniority_country_selector,
         seniority_metric_selector,
-        seniority_show_table,
         seniority_table_scope_selector,
     )
 
 
-@app.cell()
+@app.cell
 def seniority_rates(
     fnh,
     make_seniority_rate_chart,
     metric_label,
     pd,
+    reference_match_rates,
+    scoped_classification_match_rates,
     seniority_country_selector,
     seniority_metric_selector,
     seniority_table_scope_selector,
-    scoped_classification_match_rates,
 ):
     seniority_metric = seniority_metric_selector.value
     seniority_summary = scoped_classification_match_rates(
@@ -1667,11 +2491,17 @@ def seniority_rates(
         "seniority",
         selected_countries=seniority_country_selector.value,
     )
-    seniority_chart, _seniority_display = make_seniority_rate_chart(
+    seniority_reference_table = reference_match_rates(
+        fnh,
+        seniority_metric,
+        seniority_country_selector.value,
+    )
+    seniority_chart, seniority_plot_table = make_seniority_rate_chart(
         seniority_summary,
         f"Inventor {metric_label(seniority_metric)}-level match rates by seniority",
         seniority_metric,
         ["#7C3AED", "#2563EB", "#0F766E"],
+        seniority_reference_table,
     )
     seniority_summary["seniority_order"] = pd.to_numeric(
         seniority_summary["group_value"], errors="coerce"
@@ -1679,16 +2509,28 @@ def seniority_rates(
     seniority_table = seniority_summary.loc[
         seniority_summary["scope_key"] == seniority_table_scope_selector.value
     ].sort_values(["seniority_order", "group_value"], na_position="last")
-    return seniority_chart, seniority_summary, seniority_table
+    seniority_plot_table = seniority_plot_table.sort_values(
+        ["seniority_order", "country_scope"],
+        na_position="last",
+    ).drop(columns=["scope_key"], errors="ignore")
+    seniority_table = seniority_table.drop(columns=["scope_key"], errors="ignore")
+    return (
+        seniority_chart,
+        seniority_plot_table,
+        seniority_reference_table,
+        seniority_table,
+    )
 
 
-@app.cell()
+@app.cell
 def seniority_output(
+    RATE_TABLE_FORMATS,
     mo,
     seniority_chart,
     seniority_country_selector,
     seniority_metric_selector,
-    seniority_show_table,
+    seniority_plot_table,
+    seniority_reference_table,
     seniority_table,
     seniority_table_scope_selector,
 ):
@@ -1699,36 +2541,60 @@ def seniority_output(
             mo.md("No seniority level has a nonmissing denominator."), kind="warn"
         )
     )
-    _table = mo.md("")
-    if seniority_show_table.value:
-        _table = mo.vstack(
-            [
-                seniority_table_scope_selector,
-                mo.ui.table(
-                    seniority_table,
-                    pagination=True,
-                    selection="multi",
-                    show_column_summaries=False,
-                ),
-            ],
-            gap=1,
-        )
+    _all_categories_table = mo.vstack(
+        [
+            seniority_table_scope_selector,
+            mo.ui.table(
+                seniority_table,
+                pagination=True,
+                selection="multi",
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+        ],
+        gap=1,
+    )
     mo.vstack(
         [
-            mo.md("### 4.3. Match rates across seniority levels"),
+            mo.md("### 5.3. Match rates across seniority levels"),
             seniority_metric_selector,
             seniority_country_selector,
             _figure,
-            seniority_show_table,
-            mo.accordion({"Seniority table (select rows and country scope)": _table}),
+            mo.accordion(
+                {
+                    "View statistics plotted in the figure": mo.ui.table(
+                        seniority_plot_table,
+                        pagination=True,
+                        page_size=20,
+                        selection="multi",
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    ),
+                    "View reference match rates": mo.ui.table(
+                        seniority_reference_table,
+                        pagination=False,
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    ),
+                    "View all seniority statistics by country scope": (
+                        _all_categories_table
+                    ),
+                }
+            ),
         ],
         gap=1,
     )
     return
 
 
-@app.cell()
-def start_month_controls(METRIC_OPTIONS, SCOPE_OPTIONS, available_countries, fnh, mo):
+@app.cell
+def start_month_controls(
+    METRIC_OPTIONS,
+    SCOPE_OPTIONS,
+    available_countries,
+    fnh,
+    mo,
+):
     start_month_metric_selector = mo.ui.dropdown(
         options=METRIC_OPTIONS,
         value="User-company level",
@@ -1747,19 +2613,14 @@ def start_month_controls(METRIC_OPTIONS, SCOPE_OPTIONS, available_countries, fnh
         label="Country scope for the start-month table",
         full_width=True,
     )
-    start_month_show_table = mo.ui.checkbox(
-        value=False,
-        label="Display the start-month table",
-    )
     return (
         start_month_country_selector,
         start_month_metric_selector,
-        start_month_show_table,
         start_month_table_scope_selector,
     )
 
 
-@app.cell()
+@app.cell
 def start_month_rates(
     fnh,
     make_time_chart,
@@ -1781,7 +2642,7 @@ def start_month_rates(
         start_month_summary["start_month"],
         errors="coerce",
     )
-    start_month_chart, _start_month_display = make_time_chart(
+    start_month_chart, start_month_plot_table = make_time_chart(
         start_month_summary,
         (
             f"Monthly inventor {metric_label(start_month_metric)}-level match rates "
@@ -1793,16 +2654,24 @@ def start_month_rates(
     start_month_table = start_month_summary.loc[
         start_month_summary["scope_key"] == start_month_table_scope_selector.value
     ].copy()
-    return start_month_chart, start_month_summary, start_month_table
+    start_month_plot_table = start_month_plot_table.sort_values(
+        ["month", "country_scope"]
+    ).drop(columns=["scope_key"], errors="ignore")
+    start_month_table = start_month_table.sort_values("month").drop(
+        columns=["scope_key"],
+        errors="ignore",
+    )
+    return start_month_chart, start_month_plot_table, start_month_table
 
 
-@app.cell()
+@app.cell
 def start_month_output(
+    RATE_TABLE_FORMATS,
     mo,
     start_month_chart,
     start_month_country_selector,
     start_month_metric_selector,
-    start_month_show_table,
+    start_month_plot_table,
     start_month_table,
     start_month_table_scope_selector,
 ):
@@ -1813,24 +2682,23 @@ def start_month_output(
             mo.md("No valid focal-hire start month is available."), kind="warn"
         )
     )
-    _table = mo.md("")
-    if start_month_show_table.value:
-        _table = mo.vstack(
-            [
-                start_month_table_scope_selector,
-                mo.ui.table(
-                    start_month_table,
-                    pagination=True,
-                    page_size=20,
-                    selection="multi",
-                    show_column_summaries=False,
-                ),
-            ],
-            gap=1,
-        )
+    _all_months_table = mo.vstack(
+        [
+            start_month_table_scope_selector,
+            mo.ui.table(
+                start_month_table,
+                pagination=True,
+                page_size=20,
+                selection="multi",
+                show_column_summaries=False,
+                format_mapping=RATE_TABLE_FORMATS,
+            ),
+        ],
+        gap=1,
+    )
     mo.vstack(
         [
-            mo.md("### 4.4. Match rates across focal-hire start months"),
+            mo.md("### 5.4. Match rates across focal-hire start months"),
             start_month_metric_selector,
             start_month_country_selector,
             _figure,
@@ -1838,15 +2706,28 @@ def start_month_output(
                 "The chart is monthly and shows the all-country, U.S., and non-U.S. "
                 "or selected-country series separately."
             ),
-            start_month_show_table,
-            mo.accordion({"Start-month table (select rows and country scope)": _table}),
+            mo.accordion(
+                {
+                    "View statistics plotted in the figure": mo.ui.table(
+                        start_month_plot_table,
+                        pagination=True,
+                        page_size=20,
+                        selection="multi",
+                        show_column_summaries=False,
+                        format_mapping=RATE_TABLE_FORMATS,
+                    ),
+                    "View all start-month statistics by country scope": (
+                        _all_months_table
+                    ),
+                }
+            ),
         ],
         gap=1,
     )
     return
 
 
-@app.cell()
+@app.cell
 def interpretation(mo):
     mo.callout(
         mo.md(
