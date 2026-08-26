@@ -21,6 +21,9 @@ Notes:
 (5) Figure accordions expose the exact plotted rows and the corresponding full tables.
 (6) Bar-chart reference lines are pooled rates within the all-country, U.S., and selected
     (or default non-U.S.) scopes, rather than unweighted averages across countries.
+(7) Country results retain economies with at least 1,000 candidate user-company observations,
+    rank the eligible set by the selected match rate, and apply Top-N only after ranking.
+(8) Analysis tables behind Top-N charts are constructed before Top-N is applied.
 
 Run:
     $fnh_match_notebook = "codes/B01_ConstructAnalysisSample/B03_FNH_InventorMatchRates.py"
@@ -75,6 +78,7 @@ def title(mo):
 @app.cell
 def helpers(alt, pd, pl, pycountry, re):
     MISSING_LABEL = "<Missing>"
+    MIN_COUNTRY_CANDIDATE_SPELLS = 1_000
     US_LABEL = "United States"
     METRIC_OPTIONS = {
         "User-company level": "spell",
@@ -457,16 +461,45 @@ def helpers(alt, pd, pl, pycountry, re):
             ascending=[False, True],
         )
         _top_values = _largest.head(int(top_n))["group_value"].tolist()
-        _ranked = _all_country.loc[
-            _all_country["group_value"].isin(_top_values)
-        ].sort_values(
+        _rate_ranking = _all_country.sort_values(
             [_rate_column, "candidate_spells"],
             ascending=[False, False],
             na_position="last",
         )
+        _ranked = _rate_ranking.loc[_rate_ranking["group_value"].isin(_top_values)]
         _shown = summary.loc[summary["group_value"].isin(_top_values)].copy()
+        _candidate_rank = dict(
+            zip(_largest["group_value"], range(1, len(_largest) + 1), strict=True)
+        )
+        _rate_rank = dict(
+            zip(
+                _rate_ranking["group_value"],
+                range(1, len(_rate_ranking) + 1),
+                strict=True,
+            )
+        )
+        _analysis_table = summary.loc[
+            summary["group_value"] != MISSING_LABEL
+        ].copy()
+        _analysis_table["all_country_candidate_rank"] = _analysis_table[
+            "group_value"
+        ].map(_candidate_rank)
+        _analysis_table["all_country_match_rate_rank"] = _analysis_table[
+            "group_value"
+        ].map(_rate_rank)
+        _scope_rank = dict(
+            zip(
+                summary["scope_key"].drop_duplicates(),
+                range(summary["scope_key"].nunique()),
+                strict=True,
+            )
+        )
+        _analysis_table["_scope_rank"] = _analysis_table["scope_key"].map(_scope_rank)
+        _analysis_table = _analysis_table.sort_values(
+            ["all_country_candidate_rank", "_scope_rank"]
+        ).drop(columns="_scope_rank")
         if _shown.empty:
-            return None, _shown
+            return None, _analysis_table
 
         _category_order = _ranked.loc[
             _ranked["group_value"].isin(_top_values), "display_label"
@@ -529,7 +562,7 @@ def helpers(alt, pd, pl, pycountry, re):
             )
             .configure_view(stroke=None)
         )
-        return _chart, _shown
+        return _chart, _analysis_table
 
     def make_seniority_rate_chart(
         summary,
@@ -621,27 +654,24 @@ def helpers(alt, pd, pl, pycountry, re):
         top_n,
         color,
         reference_rates,
+        minimum_candidate_spells=0,
     ):
-        """Select large categories, then rank their bars by the selected rate."""
+        """Rank eligible categories once, then display the requested prefix."""
 
         _rate_column, _, _high_column, _ = metric_columns(metric)
-        _eligible = summary.loc[summary["group_value"] != MISSING_LABEL].copy()
-        _top_values = (
-            _eligible.sort_values(
-                ["candidate_spells", "display_label"],
-                ascending=[False, True],
-            )
-            .head(int(top_n))["group_value"]
-            .tolist()
-        )
-        _shown = _eligible.loc[_eligible["group_value"].isin(_top_values)].copy()
-        _shown = _shown.sort_values(
-            [_rate_column, "candidate_spells"],
-            ascending=[False, False],
+        _analysis_table = summary.loc[
+            (summary["group_value"] != MISSING_LABEL)
+            & (summary["candidate_spells"] >= int(minimum_candidate_spells))
+        ].copy()
+        _analysis_table = _analysis_table.sort_values(
+            [_rate_column, "candidate_spells", "display_label"],
+            ascending=[False, False, True],
             na_position="last",
         )
+        _analysis_table["match_rate_rank"] = range(1, len(_analysis_table) + 1)
+        _shown = _analysis_table.head(int(top_n)).copy()
         if _shown.empty:
-            return None, _shown
+            return None, _analysis_table
         _order = _shown["display_label"].tolist()
         _reference_max = reference_rates["reference_rate"].max(skipna=True)
         _rate_upper = min(
@@ -686,7 +716,7 @@ def helpers(alt, pd, pl, pycountry, re):
             )
             .configure_view(stroke=None)
         )
-        return _chart, _shown
+        return _chart, _analysis_table
 
     def make_time_chart(summary, title, metric, color_range):
         """Make a monthly line chart for the requested denominator definition."""
@@ -972,6 +1002,7 @@ def helpers(alt, pd, pl, pycountry, re):
 
     return (
         METRIC_OPTIONS,
+        MIN_COUNTRY_CANDIDATE_SPELLS,
         MISSING_LABEL,
         RATE_TABLE_FORMATS,
         SCOPE_OPTIONS,
@@ -1387,7 +1418,8 @@ def occupation_rates(
     occupation_note = (
         "The top categories are selected by their all-country candidate counts, then the "
         "bars are ranked by the selected all-country match rate. The selected countries "
-        "replace, rather than add to, the non-U.S. series."
+        "replace, rather than add to, the non-U.S. series. The analysis table is computed "
+        "before Top-N is applied."
     )
     return (
         occupation_chart,
@@ -1451,7 +1483,7 @@ def occupation_output(
             _figure,
             mo.accordion(
                 {
-                    "View statistics plotted in the figure": mo.ui.table(
+                    "View analysis table behind the figure (stable across Top-N)": mo.ui.table(
                         occupation_plot_table,
                         pagination=True,
                         page_size=20,
@@ -1473,11 +1505,6 @@ def occupation_output(
         ],
         gap=1,
     )
-    return
-
-
-@app.cell
-def _():
     return
 
 
@@ -1595,7 +1622,8 @@ def industry_rates(
     industry_note = (
         "The top categories are selected by their all-country candidate counts, then the "
         "bars are ranked by the selected all-country match rate. The selected countries "
-        "replace, rather than add to, the non-U.S. series."
+        "replace, rather than add to, the non-U.S. series. The analysis table is computed "
+        "before Top-N is applied."
     )
     return (
         industry_chart,
@@ -1659,7 +1687,7 @@ def industry_output(
             _figure,
             mo.accordion(
                 {
-                    "View statistics plotted in the figure": mo.ui.table(
+                    "View analysis table behind the figure (stable across Top-N)": mo.ui.table(
                         industry_plot_table,
                         pagination=True,
                         page_size=20,
@@ -2145,11 +2173,20 @@ def industry_occupation_output(
 
 
 @app.cell
-def country_controls(METRIC_OPTIONS, MISSING_LABEL, fnh, mo, pl):
+def country_controls(
+    METRIC_OPTIONS,
+    MIN_COUNTRY_CANDIDATE_SPELLS,
+    MISSING_LABEL,
+    fnh,
+    mo,
+    pl,
+):
     _country_count = int(
         fnh.filter(pl.col("country") != MISSING_LABEL)
-        .select(pl.col("country").n_unique())
-        .item()
+        .group_by("country")
+        .len(name="candidate_spells")
+        .filter(pl.col("candidate_spells") >= MIN_COUNTRY_CANDIDATE_SPELLS)
+        .height
     )
     country_metric_selector = mo.ui.dropdown(
         options=METRIC_OPTIONS,
@@ -2163,7 +2200,10 @@ def country_controls(METRIC_OPTIONS, MISSING_LABEL, fnh, mo, pl):
         value=min(50, max(1, _country_count)),
         step=1,
         show_value=True,
-        label="Number of countries in the bar chart",
+        label=(
+            "Number of highest-match-rate countries in the bar chart "
+            f"(eligibility: at least {MIN_COUNTRY_CANDIDATE_SPELLS:,} candidates)"
+        ),
         full_width=True,
     )
     return country_metric_selector, country_top_n_selector
@@ -2171,7 +2211,7 @@ def country_controls(METRIC_OPTIONS, MISSING_LABEL, fnh, mo, pl):
 
 @app.cell
 def country_rates(
-    MISSING_LABEL,
+    MIN_COUNTRY_CANDIDATE_SPELLS,
     classification_match_rates,
     country_iso3,
     country_metric_selector,
@@ -2188,15 +2228,18 @@ def country_rates(
     country_reference_table = reference_match_rates(fnh, country_metric)
     country_chart, country_plot_table = make_single_rate_chart(
         country_summary,
-        (f"Inventor {metric_label(country_metric)}-level match rates across economies"),
+        (
+            f"Inventor {metric_label(country_metric)}-level match rates across economies "
+            f"with at least {MIN_COUNTRY_CANDIDATE_SPELLS:,} candidate observations"
+        ),
         country_metric,
         country_top_n_selector.value,
         "#0F766E",
         country_reference_table,
+        MIN_COUNTRY_CANDIDATE_SPELLS,
     )
-    _country_map_working = country_summary.loc[
-        country_summary["group_value"] != MISSING_LABEL
-    ].copy()
+    country_summary = country_plot_table.copy()
+    _country_map_working = country_summary.copy()
     _country_map_working["iso3"] = _country_map_working["group_value"].map(country_iso3)
     mapped_country_summary = _country_map_working.dropna(subset=["iso3"]).copy()
     unmapped_country_summary = _country_map_working.loc[
@@ -2217,19 +2260,22 @@ def country_rates(
                 "candidate_spells": ":,",
                 "matched_spells": ":,",
                 "matched_users": ":,",
+                "match_rate_rank": ":,",
                 _rate_column: ":.2%",
             },
             labels={
                 "candidate_spells": "Candidate user-company observations",
                 "matched_spells": "Matched user-company observations",
                 "matched_users": "Matched users",
+                "match_rate_rank": "Match-rate rank",
                 _rate_column: f"{metric_label(country_metric).title()} match rate",
             },
             color_continuous_scale="Blues",
             range_color=(0.0, _color_max),
             projection="natural earth",
             title=(
-                f"Inventor {metric_label(country_metric)}-level match rates across economies"
+                f"Inventor {metric_label(country_metric)}-level match rates across economies "
+                f"with at least {MIN_COUNTRY_CANDIDATE_SPELLS:,} candidate observations"
             ),
         )
         country_map.update_geos(showframe=False, showcoastlines=True)
@@ -2243,20 +2289,19 @@ def country_rates(
         country_map,
         country_plot_table,
         country_reference_table,
-        country_summary,
         unmapped_country_summary,
     )
 
 
 @app.cell
 def country_output(
+    MIN_COUNTRY_CANDIDATE_SPELLS,
     RATE_TABLE_FORMATS,
     country_chart,
     country_map,
     country_metric_selector,
     country_plot_table,
     country_reference_table,
-    country_summary,
     country_top_n_selector,
     mo,
     unmapped_country_summary,
@@ -2273,7 +2318,7 @@ def country_output(
     )
     _table = mo.accordion(
         {
-            "View statistics plotted in the bar chart": mo.ui.table(
+            "View eligible-country ranking behind the bar chart": mo.ui.table(
                 country_plot_table,
                 pagination=True,
                 page_size=20,
@@ -2284,14 +2329,6 @@ def country_output(
             "View reference match rates": mo.ui.table(
                 country_reference_table,
                 pagination=False,
-                show_column_summaries=False,
-                format_mapping=RATE_TABLE_FORMATS,
-            ),
-            "View all country match-rate statistics": mo.ui.table(
-                country_summary,
-                pagination=True,
-                page_size=20,
-                selection="multi",
                 show_column_summaries=False,
                 format_mapping=RATE_TABLE_FORMATS,
             ),
@@ -2308,6 +2345,13 @@ def country_output(
         [
             mo.md("## 5. Other results"),
             mo.md("### 5.1. Match rates across economies"),
+            mo.md(
+                f"Countries must have at least **{MIN_COUNTRY_CANDIDATE_SPELLS:,}** "
+                "candidate focal new hires at the user-company level. The ranking table is "
+                "computed before Top-N is applied, so changing Top-N reveals a stable prefix. "
+                "Ranks use point estimates; the table retains the Wilson intervals. Reference "
+                "lines remain pooled rates for the full country scopes."
+            ),
             country_metric_selector,
             country_top_n_selector,
             _bar,

@@ -1,11 +1,15 @@
-# ruff: noqa: B018, PLR1711
+# ruff: noqa: PLR1711
 
 """Summary statistics for the inventor-matched candidate focal new hires."""
 
 import marimo
 
 __generated_with = "0.24.0"
-app = marimo.App(width="full", auto_download=["html"])
+app = marimo.App(
+    width="full",
+    layout_file="layouts/B04_FNH_MatchedSummaryStats.slides.json",
+    auto_download=["html"],
+)
 
 
 @app.cell
@@ -41,6 +45,10 @@ def _(mo):
 @app.cell
 def _(alt, math, pd, pycountry, re):
     MISSING_LABEL = "<Missing>"
+    US_LABEL = "United States"
+    ALL_COUNTRIES_SCOPE = "__all__"
+    US_SCOPE = "__us__"
+    NON_US_SCOPE = "__non_us__"
 
     def hierarchy_number(column_name):
         match = re.search(r"_k(\d+)$", column_name)
@@ -72,150 +80,172 @@ def _(alt, math, pd, pycountry, re):
             summary["display_label"] = summary["value"]
         return summary
 
-    def crosswalk_table(data, left_columns, right_column, right_title_column=None):
-        columns = [*left_columns, right_column]
-        if right_title_column:
-            columns.append(right_title_column)
+    def joint_distribution_table(
+        data,
+        industry_column,
+        occupation_column,
+        title_columns,
+    ):
+        industry_title = title_columns.get(industry_column)
+        occupation_title = title_columns.get(occupation_column)
+        columns = [industry_column, occupation_column]
+        for title_column in (industry_title, occupation_title):
+            if title_column:
+                columns.append(title_column)
         working = data.loc[:, columns].copy()
         for column in columns:
             working[column] = working[column].fillna(MISSING_LABEL).astype("string")
-        pairs = (
-            working.groupby(columns, dropna=False, observed=True)
+        working["industry_label"] = working[industry_column]
+        if industry_title:
+            working["industry_label"] += " — " + working[industry_title]
+        working["occupation_label"] = working[occupation_column]
+        if occupation_title:
+            working["occupation_label"] += " — " + working[occupation_title]
+        summary = (
+            working.groupby(
+                ["industry_label", "occupation_label"],
+                dropna=False,
+                observed=True,
+            )
             .size()
             .rename("count")
             .reset_index()
+            .sort_values(
+                ["count", "industry_label", "occupation_label"],
+                ascending=[False, True, True],
+            )
+            .reset_index(drop=True)
         )
-        pairs["left_label"] = pairs[left_columns[0]].astype("string")
-        if len(left_columns) > 1:
-            pairs["left_label"] = (
-                pairs[left_columns[0]].astype("string")
-                + " — "
-                + pairs[left_columns[1]].astype("string")
-            )
-        pairs["right_label"] = pairs[right_column].astype("string")
-        if right_title_column:
-            pairs["right_label"] = (
-                pairs[right_column].astype("string")
-                + " — "
-                + pairs[right_title_column].astype("string")
-            )
-        pairs["share_within_left"] = pairs["count"] / pairs.groupby(
-            "left_label", observed=True
-        )["count"].transform("sum")
-        pairs = pairs.sort_values(
-            ["left_label", "count", "right_label"], ascending=[True, False, True]
-        ).reset_index(drop=True)
-        pairs["rank"] = pairs.groupby("left_label", observed=True).cumcount() + 1
-        return pairs
+        summary["share"] = summary["count"] / len(data)
+        summary["rank"] = range(1, len(summary) + 1)
+        summary["display_label"] = summary["industry_label"] + " × " + summary["occupation_label"]
+        summary["value"] = summary["display_label"]
+        return summary
+
+    def available_country_options(data):
+        countries = sorted(
+            str(country)
+            for country in data["country"].dropna().astype("string").unique()
+            if str(country) not in {MISSING_LABEL, US_LABEL}
+        )
+        return {
+            "All countries": ALL_COUNTRIES_SCOPE,
+            US_LABEL: US_SCOPE,
+            "Non-U.S. countries": NON_US_SCOPE,
+            **{country: country for country in countries},
+        }
+
+    def filter_country_scope(data, selections):
+        selected = tuple(selections or ())
+        if not selected or ALL_COUNTRIES_SCOPE in selected:
+            return data, "All countries"
+        mask = pd.Series(False, index=data.index)
+        labels = []
+        if US_SCOPE in selected:
+            mask |= data["country"].eq(US_LABEL)
+            labels.append(US_LABEL)
+        if NON_US_SCOPE in selected:
+            mask |= data["country"].notna() & data["country"].ne(US_LABEL)
+            labels.append("Non-U.S. countries")
+        explicit_countries = [
+            value
+            for value in selected
+            if value not in {ALL_COUNTRIES_SCOPE, US_SCOPE, NON_US_SCOPE}
+        ]
+        if explicit_countries:
+            mask |= data["country"].isin(explicit_countries)
+            labels.extend(explicit_countries)
+        return data.loc[mask].copy(), ", ".join(labels)
 
     def make_share_chart(summary, title, top_n=None, baseline=None):
         top = summary.head(top_n).copy() if top_n else summary.copy()
+        top = top.drop(
+            columns=["baseline_count", "baseline_share"],
+            errors="ignore",
+        )
         if baseline is not None:
-            base_shares = baseline[["display_label", "share"]].rename(
-                columns={"share": "baseline_share"}
+            baseline_values = baseline[["display_label", "count", "share"]].rename(
+                columns={"count": "baseline_count", "share": "baseline_share"}
             )
-            top = top.merge(base_shares, on="display_label", how="left")
-            top["baseline_share"] = top["baseline_share"].fillna(0.0)
+            top = top.merge(baseline_values, on="display_label", how="left")
+            top[["baseline_count", "baseline_share"]] = top[
+                ["baseline_count", "baseline_share"]
+            ].fillna(0.0)
         else:
+            top["baseline_count"] = math.nan
             top["baseline_share"] = math.nan
         if top.empty:
             return alt.Chart(pd.DataFrame({"display_label": []})).mark_bar()
         order = top["display_label"].tolist()
         maximum = float(top[["share", "baseline_share"]].max().max())
-        domain = [0.0, maximum * 1.16 if maximum else 1.0]
+        domain = [0.0, maximum * 1.05 if maximum else 1.0]
+        matched_sample = "Inventor-matched sample (bars)"
+        universe_sample = "Universe sample (diamonds)"
+        sample_domain = [matched_sample, universe_sample]
+        sample_scale = alt.Scale(
+            domain=sample_domain,
+            range=["#2563EB", "#B91C1C"],
+        )
+        sample_legend = alt.Legend(
+            title=None,
+            orient="top",
+            direction="horizontal",
+        )
         tooltip = [
             alt.Tooltip("display_label:N", title="Category"),
             alt.Tooltip("count:Q", title="Inventor-matched hires", format=","),
             alt.Tooltip("share:Q", title="Matched share", format=".2%"),
+            alt.Tooltip("baseline_count:Q", title="Universe hires", format=","),
+            alt.Tooltip("baseline_share:Q", title="Universe share", format=".2%"),
             alt.Tooltip("rank:Q", title="Matched rank", format="d"),
-            alt.Tooltip(
-                "baseline_share:Q", title="Universe baseline share", format=".2%"
-            ),
         ]
         base = alt.Chart(top).encode(
             y=alt.Y(
                 "display_label:N",
                 sort=order,
                 title=None,
-                axis=alt.Axis(labelLimit=440, labelPadding=6),
+                axis=alt.Axis(labelLimit=620, labelPadding=6),
             ),
             tooltip=tooltip,
         )
-        bars = base.mark_bar(color="#2563EB", opacity=0.85).encode(
-            x=alt.X(
-                "share:Q",
-                title="Share of inventor-matched hires",
-                axis=alt.Axis(format=".1%"),
-                scale=alt.Scale(domain=domain),
-            )
-        )
-        labels = base.mark_text(align="left", baseline="middle", dx=4).encode(
-            x=alt.X("share:Q"), text=alt.Text("share:Q", format=".1%")
-        )
-        diamonds = base.mark_point(
-            shape="diamond", filled=True, color="#B91C1C", size=90
-        ).encode(x=alt.X("baseline_share:Q"))
-        return (
-            alt.layer(bars, labels, diamonds)
-            .properties(
-                width="container",
-                height=max(280, len(top) * 20),
-                title=alt.TitleParams(text=title, anchor="start"),
-            )
-            .configure_view(stroke=None)
-        )
-
-    def make_crosswalk_chart(pairs, selected_left, title, baseline_pairs):
-        selected = pairs.loc[pairs["left_label"] == selected_left].copy()
-        baseline = baseline_pairs.loc[
-            baseline_pairs["left_label"] == selected_left,
-            ["right_label", "share_within_left"],
-        ].rename(columns={"share_within_left": "baseline_share"})
-        selected = selected.merge(baseline, on="right_label", how="left")
-        selected["baseline_share"] = selected["baseline_share"].fillna(0.0)
-        if selected.empty:
-            return alt.Chart(pd.DataFrame({"right_label": []})).mark_bar()
-        order = selected["right_label"].tolist()
-        maximum = float(selected[["share_within_left", "baseline_share"]].max().max())
-        domain = [0.0, maximum * 1.16 if maximum else 1.0]
-        base = alt.Chart(selected).encode(
-            y=alt.Y(
-                "right_label:N",
-                sort=order,
-                title=None,
-                axis=alt.Axis(labelLimit=440, labelPadding=6),
-            ),
-            tooltip=[
-                alt.Tooltip("left_label:N", title="Selected category"),
-                alt.Tooltip("right_label:N", title="Comparison category"),
-                alt.Tooltip("count:Q", title="Inventor-matched hires", format=","),
-                alt.Tooltip("share_within_left:Q", title="Matched share", format=".2%"),
-                alt.Tooltip(
-                    "baseline_share:Q", title="Universe baseline share", format=".2%"
+        bars = (
+            base.transform_calculate(sample=f"'{matched_sample}'")
+            .mark_bar(opacity=0.85)
+            .encode(
+                x=alt.X(
+                    "share:Q",
+                    title="Share within selected country scope",
+                    axis=alt.Axis(format=".1%"),
+                    scale=alt.Scale(domain=domain),
                 ),
-                alt.Tooltip("rank:Q", title="Matched rank", format="d"),
-            ],
-        )
-        bars = base.mark_bar(color="#0F766E", opacity=0.85).encode(
-            x=alt.X(
-                "share_within_left:Q",
-                title="Share within selected category",
-                axis=alt.Axis(format=".1%"),
-                scale=alt.Scale(domain=domain),
+                color=alt.Color(
+                    "sample:N",
+                    scale=sample_scale,
+                    legend=sample_legend,
+                ),
             )
         )
-        labels = base.mark_text(align="left", baseline="middle", dx=4).encode(
-            x=alt.X("share_within_left:Q"),
-            text=alt.Text("share_within_left:Q", format=".1%"),
+        diamonds = (
+            base.transform_calculate(sample=f"'{universe_sample}'")
+            .mark_point(
+                shape="diamond",
+                filled=True,
+                size=100,
+            )
+            .encode(
+                x=alt.X("baseline_share:Q"),
+                color=alt.Color(
+                    "sample:N",
+                    scale=sample_scale,
+                    legend=sample_legend,
+                ),
+            )
         )
-        diamonds = base.mark_point(
-            shape="diamond", filled=True, color="#B91C1C", size=90
-        ).encode(x=alt.X("baseline_share:Q"))
         return (
-            alt.layer(bars, labels, diamonds)
+            alt.layer(bars, diamonds)
             .properties(
                 width="container",
-                height=max(300, len(selected) * 20),
+                height=max(280, len(top) * 24),
                 title=alt.TitleParams(text=title, anchor="start"),
             )
             .configure_view(stroke=None)
@@ -316,11 +346,12 @@ def _(alt, math, pd, pycountry, re):
 
     return (
         MISSING_LABEL,
+        available_country_options,
         country_iso3,
-        crosswalk_table,
         distribution_table,
+        filter_country_scope,
         hierarchy_number,
-        make_crosswalk_chart,
+        joint_distribution_table,
         make_share_chart,
         us_state_code,
     )
@@ -450,28 +481,25 @@ def _(ds, hierarchy_number, mo, pd):
         ]
     )
     return (
-        CROSSWALK_PATH,
         EXPECTED_RICS_COLUMNS,
         EXPECTED_ROLE_COLUMNS,
-        INPUT_DIR,
         available_rics_columns,
         available_role_columns,
         fnh,
         link_diagnostics,
-        parquet_files,
         universe_fnh,
     )
 
 
 @app.cell
 def _(
-    MISSING_LABEL,
-    available_rics_columns,
-    available_role_columns,
-    crosswalk_table,
-    distribution_table,
     EXPECTED_RICS_COLUMNS,
     EXPECTED_ROLE_COLUMNS,
+    MISSING_LABEL,
+    available_country_options,
+    available_rics_columns,
+    available_role_columns,
+    distribution_table,
     fnh,
     hierarchy_number,
     pd,
@@ -500,55 +528,6 @@ def _(
         column: distribution_table(fnh, column, title_columns.get(column))
         for column in classification_columns
     }
-    baseline_distribution_tables = {
-        column: distribution_table(universe_fnh, column, title_columns.get(column))
-        for column in classification_columns
-    }
-    onet_role_pairs = (
-        crosswalk_table(fnh, ["onet_code", "onet_title"], "role_k1500")
-        if "role_k1500" in fnh.columns
-        else pd.DataFrame()
-    )
-    baseline_onet_role_pairs = (
-        crosswalk_table(universe_fnh, ["onet_code", "onet_title"], "role_k1500")
-        if "role_k1500" in universe_fnh.columns
-        else pd.DataFrame()
-    )
-    role_onet_pairs = (
-        crosswalk_table(fnh, ["role_k1500"], "onet_code", "onet_title")
-        if "role_k1500" in fnh.columns
-        else pd.DataFrame()
-    )
-    baseline_role_onet_pairs = (
-        crosswalk_table(universe_fnh, ["role_k1500"], "onet_code", "onet_title")
-        if "role_k1500" in universe_fnh.columns
-        else pd.DataFrame()
-    )
-    finest_rics_column = available_rics_columns[-1] if available_rics_columns else None
-    rics_naics_pairs = (
-        crosswalk_table(fnh, [finest_rics_column], "naics_code", "naics_description")
-        if finest_rics_column
-        else pd.DataFrame()
-    )
-    baseline_rics_naics_pairs = (
-        crosswalk_table(
-            universe_fnh, [finest_rics_column], "naics_code", "naics_description"
-        )
-        if finest_rics_column
-        else pd.DataFrame()
-    )
-    naics_rics_pairs = (
-        crosswalk_table(fnh, ["naics_code", "naics_description"], finest_rics_column)
-        if finest_rics_column
-        else pd.DataFrame()
-    )
-    baseline_naics_rics_pairs = (
-        crosswalk_table(
-            universe_fnh, ["naics_code", "naics_description"], finest_rics_column
-        )
-        if finest_rics_column
-        else pd.DataFrame()
-    )
     classification_stats = pd.DataFrame(
         [
             {
@@ -561,8 +540,7 @@ def _(
                     summary.loc[summary["value"] == MISSING_LABEL, "count"].sum()
                 ),
                 "Matched missing share": float(
-                    summary.loc[summary["value"] == MISSING_LABEL, "count"].sum()
-                    / len(fnh)
+                    summary.loc[summary["value"] == MISSING_LABEL, "count"].sum() / len(fnh)
                 ),
             }
             for column, summary in distribution_tables.items()
@@ -574,19 +552,13 @@ def _(
         *EXPECTED_ROLE_COLUMNS,
         *EXPECTED_RICS_COLUMNS,
     ]
-    expected.extend(
-        ["naics_code", "naics_description", "country", "state", "seniority"]
-    )
+    expected.extend(["naics_code", "naics_description", "country", "state", "seniority"])
     schema_report = pd.DataFrame(
         [
             {
                 "Variable": column,
-                "Status": "Available"
-                if column in fnh.columns
-                else "Absent from input schema",
-                "Missing rows": int(fnh[column].isna().sum())
-                if column in fnh.columns
-                else pd.NA,
+                "Status": ("Available" if column in fnh.columns else "Absent from input schema"),
+                "Missing rows": (int(fnh[column].isna().sum()) if column in fnh.columns else pd.NA),
                 "Missing share": (
                     float(fnh[column].isna().mean()) if column in fnh.columns else pd.NA
                 ),
@@ -610,31 +582,59 @@ def _(
         .rename("distinct_descriptions")
         .reset_index()
     )
-    basic_numbers = {
-        "candidate_count": len(fnh),
-        "distinct_users": int(fnh["user_id"].nunique(dropna=True)),
-        "distinct_companies": int(fnh["rcid"].nunique(dropna=True)),
-        "distinct_countries": int(fnh["country"].nunique(dropna=True)),
-        "universe_count": len(universe_fnh),
+    basic_numbers = pd.DataFrame(
+        [
+            {
+                "Measure": "Number of focal new hires (user-company level)",
+                "Inventor-matched sample": len(fnh),
+                "Universe sample": len(universe_fnh),
+            },
+            {
+                "Measure": "Number of distinct users",
+                "Inventor-matched sample": int(fnh["user_id"].nunique(dropna=True)),
+                "Universe sample": int(universe_fnh["user_id"].nunique(dropna=True)),
+            },
+            {
+                "Measure": "Number of companies",
+                "Inventor-matched sample": int(fnh["rcid"].nunique(dropna=True)),
+                "Universe sample": int(universe_fnh["rcid"].nunique(dropna=True)),
+            },
+            {
+                "Measure": "Number of countries",
+                "Inventor-matched sample": int(fnh["country"].nunique(dropna=True)),
+                "Universe sample": int(universe_fnh["country"].nunique(dropna=True)),
+            },
+        ]
+    )
+    basic_numbers["Match rate"] = (
+        basic_numbers["Inventor-matched sample"] / basic_numbers["Universe sample"]
+    )
+    country_selector_options = available_country_options(universe_fnh)
+    industry_selector_options = {
+        CLASSIFICATION_LABELS[column]: column for column in ("naics_code", *available_rics_columns)
     }
+    occupation_selector_options = {
+        CLASSIFICATION_LABELS[column]: column for column in ("onet_code", *available_role_columns)
+    }
+    default_industry_column = (
+        "rics_k400"
+        if "rics_k400" in available_rics_columns
+        else available_rics_columns[-1]
+        if available_rics_columns
+        else "naics_code"
+    )
     return (
         CLASSIFICATION_LABELS,
-        baseline_distribution_tables,
-        baseline_naics_rics_pairs,
-        baseline_onet_role_pairs,
-        baseline_rics_naics_pairs,
-        baseline_role_onet_pairs,
         basic_numbers,
         classification_stats,
-        distribution_tables,
-        finest_rics_column,
-        naics_rics_pairs,
+        country_selector_options,
+        default_industry_column,
+        industry_selector_options,
         naics_title_diagnostic,
-        onet_role_pairs,
+        occupation_selector_options,
         onet_title_diagnostic,
-        role_onet_pairs,
-        rics_naics_pairs,
         schema_report,
+        title_columns,
     )
 
 
@@ -650,8 +650,21 @@ def _(
 ):
     onet_conflicts = int((onet_title_diagnostic["distinct_titles"] > 1).sum())
     naics_conflicts = int((naics_title_diagnostic["distinct_descriptions"] > 1).sum())
-    _candidate_count = basic_numbers["candidate_count"]
-    match_share = basic_numbers["candidate_count"] / basic_numbers["universe_count"]
+    _table_rows = "\n".join(
+        "| "
+        + str(measure)
+        + " | "
+        + f"{int(matched):,}"
+        + " | "
+        + f"{int(universe):,}"
+        + " | "
+        + f"{match_rate:.2%}"
+        + " |"
+        for measure, matched, universe, match_rate in basic_numbers.itertuples(
+            index=False,
+            name=None,
+        )
+    )
     mo.vstack(
         [
             mo.md("## 1. Basic numbers"),
@@ -672,16 +685,8 @@ def _(
                 """
             ),
             mo.md(
-                f"""
-                | Number | Value |
-                |---|---:|
-                | Inventor-matched candidate focal new hires | {_candidate_count:,} |
-                | Distinct matched users | {basic_numbers["distinct_users"]:,} |
-                | Distinct matched companies | {basic_numbers["distinct_companies"]:,} |
-                | Distinct matched countries | {basic_numbers["distinct_countries"]:,} |
-                | Universe candidate focal new hires | {basic_numbers["universe_count"]:,} |
-                | Matched share of universe observations | {match_share:.2%} |
-                """
+                "| Measure | Inventor-matched sample | Universe sample | Match rate |\n"
+                "|---|---:|---:|---:|\n" + _table_rows
             ),
             mo.accordion(
                 {
@@ -691,10 +696,14 @@ def _(
                         show_column_summaries=False,
                     ),
                     "Requested-variable coverage": mo.ui.table(
-                        schema_report, pagination=False, show_column_summaries=False
+                        schema_report,
+                        pagination=False,
+                        show_column_summaries=False,
                     ),
                     "Inventor crosswalk diagnostics": mo.ui.table(
-                        link_diagnostics, pagination=False, show_column_summaries=False
+                        link_diagnostics,
+                        pagination=False,
+                        show_column_summaries=False,
                     ),
                     "Label diagnostics": mo.md(
                         f"O*NET codes with multiple titles: **{onet_conflicts:,}**; "
@@ -720,16 +729,45 @@ def _(mo):
 
 
 @app.cell
-def _(baseline_distribution_tables, distribution_tables, make_share_chart, mo):
-    _summary = distribution_tables["onet_code"]
+def _(country_selector_options, mo):
+    onet_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    return (onet_country_selector,)
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    make_share_chart,
+    mo,
+    onet_country_selector,
+    universe_fnh,
+):
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        onet_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        onet_country_selector.value,
+    )
+    _summary = distribution_table(_matched_scope, "onet_code", "onet_title")
+    _baseline = distribution_table(_universe_scope, "onet_code", "onet_title")
     _chart = make_share_chart(
         _summary,
-        "O*NET occupation distribution",
-        baseline=baseline_distribution_tables["onet_code"],
+        f"O*NET occupation distribution — {_scope_label}",
+        baseline=_baseline,
     )
     mo.vstack(
         [
             mo.md("### 2.1. O*NET occupation distribution"),
+            onet_country_selector,
             _chart,
             mo.accordion(
                 {
@@ -748,49 +786,68 @@ def _(baseline_distribution_tables, distribution_tables, make_share_chart, mo):
 
 
 @app.cell
-def _(available_role_columns, mo):
+def _(available_role_columns, country_selector_options, mo):
+    role_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
     role_variable_selector = mo.ui.dropdown(
         options=list(available_role_columns),
         value="role_k1500" if "role_k1500" in available_role_columns else None,
         label="Revelio occupation variable",
+        full_width=True,
     )
     role_top_n_selector = mo.ui.number(
-        start=1, stop=1000, step=1, value=50, label="Number of top occupations"
+        start=1,
+        stop=1000,
+        step=1,
+        value=50,
+        label="Number of top occupations",
+    )
+    return role_country_selector, role_top_n_selector, role_variable_selector
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    make_share_chart,
+    mo,
+    role_country_selector,
+    role_top_n_selector,
+    role_variable_selector,
+    universe_fnh,
+):
+    _variable = role_variable_selector.value
+    _top_n = max(1, int(role_top_n_selector.value))
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        role_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        role_country_selector.value,
+    )
+    _summary = distribution_table(_matched_scope, _variable)
+    _baseline = distribution_table(_universe_scope, _variable)
+    _chart = make_share_chart(
+        _summary,
+        f"Top {_top_n} occupations in {_variable} — {_scope_label}",
+        _top_n,
+        baseline=_baseline,
     )
     mo.vstack(
         [
             mo.md("### 2.2. Revelio's own occupation distribution"),
             mo.hstack(
-                [role_variable_selector, role_top_n_selector],
+                [role_country_selector, role_variable_selector, role_top_n_selector],
                 justify="start",
                 gap=2,
+                widths="equal",
             ),
-        ],
-        gap=1,
-    )
-    return role_top_n_selector, role_variable_selector
-
-
-@app.cell
-def _(
-    baseline_distribution_tables,
-    distribution_tables,
-    make_share_chart,
-    mo,
-    role_top_n_selector,
-    role_variable_selector,
-):
-    _variable = role_variable_selector.value
-    _top_n = max(1, int(role_top_n_selector.value))
-    _summary = distribution_tables[_variable]
-    _chart = make_share_chart(
-        _summary,
-        f"Top {_top_n} occupations in {_variable}",
-        _top_n,
-        baseline=baseline_distribution_tables[_variable],
-    )
-    mo.vstack(
-        [
             _chart,
             mo.accordion(
                 {
@@ -809,112 +866,6 @@ def _(
 
 
 @app.cell
-def _(MISSING_LABEL, mo, onet_role_pairs):
-    if onet_role_pairs.empty:
-        onet_role_selector = None
-        _control = mo.callout(mo.md("`role_k1500` is unavailable."), kind="warn")
-    else:
-        _choices = {
-            f"{left} ({int(group['count'].sum()):,} hires)": left
-            for left, group in onet_role_pairs.groupby("left_label", sort=False)
-            if left != MISSING_LABEL
-        }
-        onet_role_selector = mo.ui.dropdown(
-            options=_choices,
-            value=next(iter(_choices)) if _choices else None,
-            searchable=True,
-            label="O*NET occupation",
-            full_width=True,
-        )
-        _control = onet_role_selector
-    mo.vstack(
-        [
-            mo.md("### 2.3. Crosswalk from O*NET to Revelio's own occupation"),
-            mo.md(
-                "Matched bars and universe-baseline diamonds show conditional shares."
-            ),
-            _control,
-        ],
-        gap=1,
-    )
-    return (onet_role_selector,)
-
-
-@app.cell
-def _(
-    baseline_onet_role_pairs,
-    make_crosswalk_chart,
-    mo,
-    onet_role_pairs,
-    onet_role_selector,
-):
-    _output = mo.md("")
-    if onet_role_selector is not None:
-        _selected = onet_role_selector.value
-        _chart = make_crosswalk_chart(
-            onet_role_pairs,
-            _selected,
-            f"Revelio role composition of {_selected}",
-            baseline_onet_role_pairs,
-        )
-        _output = mo.vstack([_chart], gap=1)
-    _output
-
-
-@app.cell
-def _(MISSING_LABEL, mo, role_onet_pairs):
-    if role_onet_pairs.empty:
-        role_onet_selector = None
-        _control = mo.callout(mo.md("`role_k1500` is unavailable."), kind="warn")
-    else:
-        _choices = {
-            f"{left} ({int(group['count'].sum()):,} hires)": left
-            for left, group in role_onet_pairs.groupby("left_label", sort=False)
-            if left != MISSING_LABEL
-        }
-        role_onet_selector = mo.ui.dropdown(
-            options=_choices,
-            value=next(iter(_choices)) if _choices else None,
-            searchable=True,
-            label="Revelio role K1,500",
-            full_width=True,
-        )
-        _control = role_onet_selector
-    mo.vstack(
-        [
-            mo.md("### 2.4. Crosswalk from Revelio's own occupation to O*NET"),
-            mo.md(
-                "Matched bars and universe-baseline diamonds show conditional shares."
-            ),
-            _control,
-        ],
-        gap=1,
-    )
-    return (role_onet_selector,)
-
-
-@app.cell
-def _(
-    baseline_role_onet_pairs,
-    make_crosswalk_chart,
-    mo,
-    role_onet_pairs,
-    role_onet_selector,
-):
-    _output = mo.md("")
-    if role_onet_selector is not None:
-        _selected = role_onet_selector.value
-        _chart = make_crosswalk_chart(
-            role_onet_pairs,
-            _selected,
-            f"O*NET composition of {_selected}",
-            baseline_role_onet_pairs,
-        )
-        _output = mo.vstack([_chart], gap=1)
-    _output
-
-
-@app.cell
 def _(mo):
     mo.md(r"""
     ## 3. The industry distribution
@@ -926,200 +877,335 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    naics_top_n_selector = mo.ui.number(
-        start=1, stop=2000, step=1, value=50, label="Number of top NAICS industries"
+def _(country_selector_options, mo):
+    naics_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
     )
-    mo.vstack([mo.md("### 3.1. NAICS distribution"), naics_top_n_selector], gap=1)
-    return (naics_top_n_selector,)
+    naics_top_n_selector = mo.ui.number(
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of top NAICS industries",
+    )
+    return naics_country_selector, naics_top_n_selector
 
 
 @app.cell
 def _(
-    baseline_distribution_tables,
-    distribution_tables,
+    distribution_table,
+    filter_country_scope,
+    fnh,
     make_share_chart,
     mo,
+    naics_country_selector,
     naics_top_n_selector,
+    universe_fnh,
 ):
-    _chart = make_share_chart(
-        distribution_tables["naics_code"],
-        "Top NAICS industries",
-        int(naics_top_n_selector.value),
-        baseline=baseline_distribution_tables["naics_code"],
+    _top_n = max(1, int(naics_top_n_selector.value))
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        naics_country_selector.value,
     )
-    _chart
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        naics_country_selector.value,
+    )
+    _summary = distribution_table(
+        _matched_scope,
+        "naics_code",
+        "naics_description",
+    )
+    _baseline = distribution_table(
+        _universe_scope,
+        "naics_code",
+        "naics_description",
+    )
+    _chart = make_share_chart(
+        _summary,
+        f"Top {_top_n} NAICS industries — {_scope_label}",
+        _top_n,
+        baseline=_baseline,
+    )
+    mo.vstack(
+        [
+            mo.md("### 3.1. NAICS distribution"),
+            mo.hstack(
+                [naics_country_selector, naics_top_n_selector],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            _chart,
+            mo.accordion(
+                {
+                    "View matched NAICS categories": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
 
 
 @app.cell
-def _(available_rics_columns, mo):
+def _(available_rics_columns, country_selector_options, mo):
+    rics_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
     rics_variable_selector = mo.ui.dropdown(
         options=list(available_rics_columns),
         value="rics_k400" if "rics_k400" in available_rics_columns else None,
         label="Revelio industry variable",
+        full_width=True,
     )
     rics_top_n_selector = mo.ui.number(
-        start=1, stop=2000, step=1, value=50, label="Number of top Revelio industries"
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of top Revelio industries",
+    )
+    return rics_country_selector, rics_top_n_selector, rics_variable_selector
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    make_share_chart,
+    mo,
+    rics_country_selector,
+    rics_top_n_selector,
+    rics_variable_selector,
+    universe_fnh,
+):
+    _variable = rics_variable_selector.value
+    _top_n = max(1, int(rics_top_n_selector.value))
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        rics_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        rics_country_selector.value,
+    )
+    _summary = distribution_table(_matched_scope, _variable)
+    _baseline = distribution_table(_universe_scope, _variable)
+    _chart = make_share_chart(
+        _summary,
+        f"Top {_top_n} industries in {_variable} — {_scope_label}",
+        _top_n,
+        baseline=_baseline,
     )
     mo.vstack(
         [
             mo.md("### 3.2. Revelio's own industry distribution"),
             mo.hstack(
-                [rics_variable_selector, rics_top_n_selector], justify="start", gap=2
+                [rics_country_selector, rics_variable_selector, rics_top_n_selector],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            _chart,
+            mo.accordion(
+                {
+                    "View matched Revelio industry categories": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
             ),
         ],
         gap=1,
     )
-    return rics_top_n_selector, rics_variable_selector
+    return
 
 
 @app.cell
 def _(
-    baseline_distribution_tables,
-    distribution_tables,
+    CLASSIFICATION_LABELS,
+    country_selector_options,
+    default_industry_column,
+    industry_selector_options,
+    mo,
+    occupation_selector_options,
+):
+    industry_occupation_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    industry_occupation_industry_selector = mo.ui.dropdown(
+        options=industry_selector_options,
+        value=CLASSIFICATION_LABELS[default_industry_column],
+        label="Industry variable",
+        full_width=True,
+    )
+    industry_occupation_occupation_selector = mo.ui.dropdown(
+        options=occupation_selector_options,
+        value=CLASSIFICATION_LABELS["onet_code"],
+        label="Occupation variable",
+        full_width=True,
+    )
+    industry_occupation_top_n_selector = mo.ui.number(
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of top industry–occupation combinations",
+    )
+    return (
+        industry_occupation_country_selector,
+        industry_occupation_industry_selector,
+        industry_occupation_occupation_selector,
+        industry_occupation_top_n_selector,
+    )
+
+
+@app.cell
+def _(
+    filter_country_scope,
+    fnh,
+    industry_occupation_country_selector,
+    industry_occupation_industry_selector,
+    industry_occupation_occupation_selector,
+    industry_occupation_top_n_selector,
+    joint_distribution_table,
     make_share_chart,
     mo,
-    rics_top_n_selector,
-    rics_variable_selector,
+    title_columns,
+    universe_fnh,
 ):
-    _variable = rics_variable_selector.value
-    _top_n = int(rics_top_n_selector.value)
+    _industry_column = industry_occupation_industry_selector.value
+    _occupation_column = industry_occupation_occupation_selector.value
+    _top_n = max(1, int(industry_occupation_top_n_selector.value))
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        industry_occupation_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        industry_occupation_country_selector.value,
+    )
+    _summary = joint_distribution_table(
+        _matched_scope,
+        _industry_column,
+        _occupation_column,
+        title_columns,
+    )
+    _baseline = joint_distribution_table(
+        _universe_scope,
+        _industry_column,
+        _occupation_column,
+        title_columns,
+    )
     _chart = make_share_chart(
-        distribution_tables[_variable],
-        f"Top {_top_n} industries in {_variable}",
+        _summary,
+        f"Top {_top_n} industry–occupation combinations — {_scope_label}",
         _top_n,
-        baseline=baseline_distribution_tables[_variable],
+        baseline=_baseline,
     )
-    _chart
-
-
-@app.cell
-def _(MISSING_LABEL, mo, naics_rics_pairs):
-    if naics_rics_pairs.empty:
-        naics_rics_selector = None
-        _control = mo.callout(mo.md("No RICS field is available."), kind="warn")
-    else:
-        _choices = {
-            f"{left} ({int(group['count'].sum()):,} hires)": left
-            for left, group in naics_rics_pairs.groupby("left_label", sort=False)
-            if left != MISSING_LABEL
-        }
-        naics_rics_selector = mo.ui.dropdown(
-            options=_choices,
-            value=next(iter(_choices)) if _choices else None,
-            searchable=True,
-            label="NAICS code and description",
-            full_width=True,
-        )
-        _control = naics_rics_selector
     mo.vstack(
         [
-            mo.md("### 3.3. Crosswalk from NAICS to Revelio's own industry"),
+            mo.md("## 4. Industry–occupation distribution"),
             mo.md(
-                "Matched bars and universe-baseline diamonds show conditional shares."
+                "Bars show shares in the inventor-matched sample; red diamonds show "
+                "shares in the universe sample for the same combinations."
             ),
-            _control,
+            mo.hstack(
+                [
+                    industry_occupation_country_selector,
+                    industry_occupation_top_n_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            mo.hstack(
+                [
+                    industry_occupation_industry_selector,
+                    industry_occupation_occupation_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            _chart,
+            mo.accordion(
+                {
+                    "View matched industry–occupation combinations": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
         ],
         gap=1,
     )
-    return (naics_rics_selector,)
+    return
 
 
 @app.cell
 def _(
-    baseline_naics_rics_pairs,
-    finest_rics_column,
-    make_crosswalk_chart,
-    mo,
-    naics_rics_pairs,
-    naics_rics_selector,
+    country_iso3,
+    distribution_table,
+    fnh,
+    math,
+    universe_fnh,
+    us_state_code,
 ):
-    _output = mo.md("")
-    if naics_rics_selector is not None:
-        _selected = naics_rics_selector.value
-        _chart = make_crosswalk_chart(
-            naics_rics_pairs,
-            _selected,
-            f"{finest_rics_column} composition of {_selected}",
-            baseline_naics_rics_pairs,
-        )
-        _output = mo.vstack([_chart], gap=1)
-    _output
-
-
-@app.cell
-def _(MISSING_LABEL, finest_rics_column, mo, rics_naics_pairs):
-    if rics_naics_pairs.empty:
-        rics_naics_selector = None
-        _control = mo.callout(mo.md("No RICS field is available."), kind="warn")
-    else:
-        _choices = {
-            f"{left} ({int(group['count'].sum()):,} hires)": left
-            for left, group in rics_naics_pairs.groupby("left_label", sort=False)
-            if left != MISSING_LABEL
-        }
-        rics_naics_selector = mo.ui.dropdown(
-            options=_choices,
-            value=next(iter(_choices)) if _choices else None,
-            searchable=True,
-            label=finest_rics_column,
-            full_width=True,
-        )
-        _control = rics_naics_selector
-    mo.vstack(
-        [
-            mo.md("### 3.4. Crosswalk from Revelio's own industry to NAICS"),
-            mo.md(
-                "Matched bars and universe-baseline diamonds show conditional shares."
-            ),
-            _control,
-        ],
-        gap=1,
-    )
-    return (rics_naics_selector,)
-
-
-@app.cell
-def _(
-    baseline_rics_naics_pairs,
-    finest_rics_column,
-    make_crosswalk_chart,
-    mo,
-    rics_naics_pairs,
-    rics_naics_selector,
-):
-    _output = mo.md("")
-    if rics_naics_selector is not None:
-        _selected = rics_naics_selector.value
-        _chart = make_crosswalk_chart(
-            rics_naics_pairs,
-            _selected,
-            f"NAICS composition of {_selected} ({finest_rics_column})",
-            baseline_rics_naics_pairs,
-        )
-        _output = mo.vstack([_chart], gap=1)
-    _output
-
-
-@app.cell
-def _(country_iso3, distribution_table, fnh, math, universe_fnh, us_state_code):
     country_summary = distribution_table(fnh, "country")
     baseline_country_summary = distribution_table(universe_fnh, "country")
+    _baseline_country_values = baseline_country_summary[
+        ["country", "display_label", "count", "share"]
+    ].rename(
+        columns={
+            "country": "baseline_country",
+            "count": "baseline_count",
+            "share": "baseline_share",
+        }
+    )
+    country_summary = country_summary.merge(
+        _baseline_country_values,
+        on="display_label",
+        how="outer",
+    )
+    country_summary["country"] = country_summary["country"].fillna(
+        country_summary["baseline_country"]
+    )
+    country_summary[["count", "share", "baseline_count", "baseline_share"]] = country_summary[
+        ["count", "share", "baseline_count", "baseline_share"]
+    ].fillna(0.0)
+    country_summary = country_summary.sort_values(
+        ["share", "baseline_share", "display_label"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    country_summary["rank"] = range(1, len(country_summary) + 1)
+    country_summary["value"] = country_summary["display_label"]
     country_summary["iso3"] = country_summary["country"].map(country_iso3)
     country_summary["log10_count"] = country_summary["count"].map(
         lambda count: math.log10(count) if count > 0 else 0
     )
-    country_baseline = baseline_country_summary[["display_label", "share"]].rename(
-        columns={"share": "baseline_share"}
-    )
-    country_summary = country_summary.merge(
-        country_baseline, on="display_label", how="left"
-    )
-    country_summary["baseline_share"] = country_summary["baseline_share"].fillna(0.0)
     mapped_country_summary = country_summary.dropna(subset=["iso3"]).copy()
-    unmapped_country_summary = country_summary.loc[
-        country_summary["iso3"].isna()
-    ].copy()
+    unmapped_country_summary = country_summary.loc[country_summary["iso3"].isna()].copy()
     state_working = fnh.loc[fnh["country"] == "United States", ["state"]].copy()
     state_baseline_working = universe_fnh.loc[
         universe_fnh["country"] == "United States", ["state"]
@@ -1127,10 +1213,7 @@ def _(country_iso3, distribution_table, fnh, math, universe_fnh, us_state_code):
     for working in [state_working, state_baseline_working]:
         working["state"] = working["state"].fillna("<Missing>")
     us_state_summary = (
-        state_working.groupby("state", observed=True)
-        .size()
-        .rename("count")
-        .reset_index()
+        state_working.groupby("state", observed=True).size().rename("count").reset_index()
     )
     baseline_state_summary = (
         state_baseline_working.groupby("state", observed=True)
@@ -1142,37 +1225,46 @@ def _(country_iso3, distribution_table, fnh, math, universe_fnh, us_state_code):
         us_state_summary["count"] / us_state_summary["count"].sum()
     )
     baseline_state_summary["baseline_share_within_country"] = (
-        baseline_state_summary["baseline_count"]
-        / baseline_state_summary["baseline_count"].sum()
+        baseline_state_summary["baseline_count"] / baseline_state_summary["baseline_count"].sum()
     )
     us_state_summary = us_state_summary.merge(
-        baseline_state_summary, on="state", how="left"
+        baseline_state_summary,
+        on="state",
+        how="left",
     )
     us_state_summary["baseline_share_within_country"] = us_state_summary[
         "baseline_share_within_country"
     ].fillna(0.0)
     us_state_summary["state_code"] = us_state_summary["state"].map(us_state_code)
     state_map_data = us_state_summary.dropna(subset=["state_code"]).copy()
-    unmatched_state_data = us_state_summary.loc[
-        us_state_summary["state_code"].isna()
-    ].copy()
+    unmatched_state_data = us_state_summary.loc[us_state_summary["state_code"].isna()].copy()
     state_map_coverage = (
         state_map_data["count"].sum() / us_state_summary["count"].sum()
         if not us_state_summary.empty
         else 0.0
     )
     return (
+        baseline_country_summary,
+        country_summary,
         mapped_country_summary,
         state_map_coverage,
         state_map_data,
-        unmatched_state_data,
         unmapped_country_summary,
+        unmatched_state_data,
     )
 
 
 @app.cell
-def _(mapped_country_summary, mo, px, unmapped_country_summary):
-    _figure = px.choropleth(
+def _(
+    baseline_country_summary,
+    country_summary,
+    make_share_chart,
+    mapped_country_summary,
+    mo,
+    px,
+    unmapped_country_summary,
+):
+    _map = px.choropleth(
         mapped_country_summary,
         locations="iso3",
         color="log10_count",
@@ -1182,36 +1274,51 @@ def _(mapped_country_summary, mo, px, unmapped_country_summary):
             "log10_count": False,
             "count": ":,",
             "share": ":.2%",
+            "baseline_count": ":,",
             "baseline_share": ":.2%",
         },
         labels={
             "count": "Inventor-matched hires",
             "share": "Matched share",
-            "baseline_share": "Universe baseline share",
+            "baseline_count": "Universe hires",
+            "baseline_share": "Universe share",
             "log10_count": "Log10 inventor-matched hires",
         },
         color_continuous_scale="Blues",
         projection="natural earth",
         title="Inventor-matched candidate focal new hires by country",
     ).update_geos(showframe=False, showcoastlines=True)
+    _country_bars = make_share_chart(
+        country_summary,
+        "Country distribution: matched sample versus universe",
+        baseline=baseline_country_summary,
+    )
     mo.vstack(
         [
-            mo.md("## 4. Other results\n\n### 4.1. Geography distribution"),
+            mo.md("## 5. Other results\n\n### 5.1. Geography distribution"),
             mo.md("Hover over a country to compare matched and universe shares."),
-            _figure,
+            _map,
+            _country_bars,
             mo.accordion(
                 {
+                    "View country statistics": mo.ui.table(
+                        country_summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    ),
                     "View country counts not mapped to ISO-3": mo.ui.table(
                         unmapped_country_summary,
                         pagination=True,
                         page_size=20,
                         show_column_summaries=False,
-                    )
+                    ),
                 }
             ),
         ],
         gap=1,
     )
+    return
 
 
 @app.cell
@@ -1271,12 +1378,8 @@ def _(mo, px, state_map_coverage, state_map_data, unmatched_state_data):
 
 @app.cell
 def _(alt, distribution_table, fnh, mo, pd, universe_fnh):
-    matched = distribution_table(fnh, "seniority")[
-        ["display_label", "count", "share"]
-    ].copy()
-    baseline = distribution_table(universe_fnh, "seniority")[
-        ["display_label", "share"]
-    ].copy()
+    matched = distribution_table(fnh, "seniority")[["display_label", "count", "share"]].copy()
+    baseline = distribution_table(universe_fnh, "seniority")[["display_label", "share"]].copy()
     baseline = baseline.rename(columns={"share": "baseline_share"})
     seniority = matched.merge(baseline, on="display_label", how="outer").fillna(0.0)
     seniority["sample"] = "Inventor-matched"
@@ -1287,15 +1390,11 @@ def _(alt, distribution_table, fnh, mo, pd, universe_fnh):
     matched_plot = seniority[["display_label", "share"]].copy()
     matched_plot["sample"] = "Inventor-matched"
     plot_data = pd.concat([matched_plot, baseline_plot], ignore_index=True)
-    plot_data["seniority_order"] = pd.to_numeric(
-        plot_data["display_label"], errors="coerce"
-    )
+    plot_data["seniority_order"] = pd.to_numeric(plot_data["display_label"], errors="coerce")
     order = (
         plot_data[["display_label", "seniority_order"]]
         .drop_duplicates()
-        .sort_values(["seniority_order", "display_label"], na_position="last")[
-            "display_label"
-        ]
+        .sort_values(["seniority_order", "display_label"], na_position="last")["display_label"]
         .tolist()
     )
     _figure = (
@@ -1327,7 +1426,8 @@ def _(alt, distribution_table, fnh, mo, pd, universe_fnh):
         .properties(width="container", height=380)
         .configure_view(stroke=None)
     )
-    mo.vstack([mo.md("### 4.2. Seniority distribution"), _figure], gap=1)
+    mo.vstack([mo.md("### 5.2. Seniority distribution"), _figure], gap=1)
+    return
 
 
 @app.cell
@@ -1354,12 +1454,10 @@ def _(alt, fnh, mo, pd, universe_fnh):
         .size()
         .rename("universe_count")
     )
-    time_series = (
-        pd.concat([matched_series, baseline_series], axis=1).fillna(0).reset_index()
-    )
-    time_series["matched_share_of_universe"] = time_series[
-        "matched_count"
-    ] / time_series["universe_count"].replace(0, pd.NA)
+    time_series = pd.concat([matched_series, baseline_series], axis=1).fillna(0).reset_index()
+    time_series["matched_share_of_universe"] = time_series["matched_count"] / time_series[
+        "universe_count"
+    ].replace(0, pd.NA)
     time_series["matched_month_share"] = (
         time_series["matched_count"] / time_series["matched_count"].sum()
     )
@@ -1384,9 +1482,7 @@ def _(alt, fnh, mo, pd, universe_fnh):
         ]
     ].rename(columns={"universe_count": "count", "universe_month_share": "share"})
     _baseline_month_plot["sample"] = "Universe baseline"
-    _share_plot_data = pd.concat(
-        [_matched_month_plot, _baseline_month_plot], ignore_index=True
-    )
+    _share_plot_data = pd.concat([_matched_month_plot, _baseline_month_plot], ignore_index=True)
     _count_figure = (
         alt.Chart(time_series)
         .mark_line(point=True, color="#7C3AED")
@@ -1395,9 +1491,7 @@ def _(alt, fnh, mo, pd, universe_fnh):
             y=alt.Y("matched_count:Q", title="Inventor-matched candidate new hires"),
             tooltip=[
                 alt.Tooltip("start_month:T", title="Start month", format="%b %Y"),
-                alt.Tooltip(
-                    "matched_count:Q", title="Inventor-matched hires", format=","
-                ),
+                alt.Tooltip("matched_count:Q", title="Inventor-matched hires", format=","),
                 alt.Tooltip(
                     "matched_share_of_universe:Q",
                     title="Matched share of universe",
@@ -1413,9 +1507,7 @@ def _(alt, fnh, mo, pd, universe_fnh):
         .mark_line(point=True)
         .encode(
             x=alt.X("start_month:T", title="Employment start month"),
-            y=alt.Y(
-                "share:Q", title="Share of each sample", axis=alt.Axis(format=".1%")
-            ),
+            y=alt.Y("share:Q", title="Share of each sample", axis=alt.Axis(format=".1%")),
             color=alt.Color(
                 "sample:N",
                 scale=alt.Scale(
@@ -1440,7 +1532,7 @@ def _(alt, fnh, mo, pd, universe_fnh):
     )
     mo.vstack(
         [
-            mo.md("### 4.3. Time-series"),
+            mo.md("### 5.3. Time-series"),
             mo.md("Monthly count of inventor-matched candidate focal new hires."),
             _count_figure,
             mo.md(
@@ -1451,6 +1543,7 @@ def _(alt, fnh, mo, pd, universe_fnh):
         ],
         gap=1,
     )
+    return
 
 
 if __name__ == "__main__":
