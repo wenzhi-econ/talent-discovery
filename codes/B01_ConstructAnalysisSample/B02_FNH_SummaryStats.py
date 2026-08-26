@@ -30,12 +30,18 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # Universe of candidate focal new hires: summary statistics
+    # Universe of candidate focal new hires: Summary statistics
 
-    This notebook describes the broadest universe of candidate focal new hires. The
-    observation unit is a **user-company observation**: one user can appear more than
-    once when they are observed as a new hire at different companies. All distributions
-    below are simple averages over these user-company observations.
+    Notes:
+    - This notebook describes the broadest universe of candidate focal new hires.
+    - The observation unit is at **user-company** level: one user can appear more than once when they are observed as a new hire at different companies.
+    - All distributions below are simple averages over these user-company observations.
+
+    The purpose of this notebook:
+    - It is **not** as a description of the final research sample.
+    - It starts with the broadest sample of new hires we can study, and all summary statistics I will present today should be used to guide the sample construction for our final analysis sample.
+    - Charts in this report the occupation, industry, geography, and seniority distribution among this broadest universe.
+    - **They will serve as a baseline when comparing with the inventor-matched sample of candidate new hires.**
     """)
     return
 
@@ -43,6 +49,10 @@ def _(mo):
 @app.cell
 def _(alt, math, pd, pycountry, re):
     MISSING_LABEL = "<Missing>"
+    US_LABEL = "United States"
+    ALL_COUNTRIES_SCOPE = "__all__"
+    US_SCOPE = "__us__"
+    NON_US_SCOPE = "__non_us__"
 
     def hierarchy_number(column_name):
         match = re.search(r"_k(\d+)$", column_name)
@@ -74,6 +84,88 @@ def _(alt, math, pd, pycountry, re):
             summary["display_label"] = summary["value"]
         return summary
 
+    def joint_distribution_table(
+        data,
+        industry_column,
+        occupation_column,
+        title_columns,
+    ):
+        industry_title = title_columns.get(industry_column)
+        occupation_title = title_columns.get(occupation_column)
+        columns = [industry_column, occupation_column]
+        for title_column in (industry_title, occupation_title):
+            if title_column:
+                columns.append(title_column)
+        working = data.loc[:, columns].copy()
+        for column in columns:
+            working[column] = working[column].fillna(MISSING_LABEL).astype("string")
+        working["industry_label"] = working[industry_column]
+        if industry_title:
+            working["industry_label"] += " — " + working[industry_title]
+        working["occupation_label"] = working[occupation_column]
+        if occupation_title:
+            working["occupation_label"] += " — " + working[occupation_title]
+        summary = (
+            working.groupby(
+                ["industry_label", "occupation_label"],
+                dropna=False,
+                observed=True,
+            )
+            .size()
+            .rename("count")
+            .reset_index()
+            .sort_values(
+                ["count", "industry_label", "occupation_label"],
+                ascending=[False, True, True],
+            )
+            .reset_index(drop=True)
+        )
+        summary["share"] = summary["count"] / len(data)
+        summary["rank"] = range(1, len(summary) + 1)
+        summary["display_label"] = summary["industry_label"] + " × " + summary["occupation_label"]
+        summary["value"] = summary["display_label"]
+        return summary
+
+    def category_selector_options(data, value_column, title_column=None):
+        summary = distribution_table(data, value_column, title_column)
+        summary = summary.loc[summary["value"] != MISSING_LABEL].drop_duplicates("value")
+        return dict(zip(summary["display_label"], summary["value"], strict=True))
+
+    def available_country_options(data):
+        countries = sorted(
+            str(country)
+            for country in data["country"].dropna().astype("string").unique()
+            if str(country) not in {MISSING_LABEL, US_LABEL}
+        )
+        return {
+            "All countries": ALL_COUNTRIES_SCOPE,
+            US_LABEL: US_SCOPE,
+            "Non-US countries": NON_US_SCOPE,
+            **{country: country for country in countries},
+        }
+
+    def filter_country_scope(data, selections):
+        selected = tuple(selections or ())
+        if not selected or ALL_COUNTRIES_SCOPE in selected:
+            return data, "All countries"
+        mask = pd.Series(False, index=data.index)
+        labels = []
+        if US_SCOPE in selected:
+            mask |= data["country"].eq(US_LABEL)
+            labels.append(US_LABEL)
+        if NON_US_SCOPE in selected:
+            mask |= data["country"].notna() & data["country"].ne(US_LABEL)
+            labels.append("Non-US countries")
+        explicit_countries = [
+            value
+            for value in selected
+            if value not in {ALL_COUNTRIES_SCOPE, US_SCOPE, NON_US_SCOPE}
+        ]
+        if explicit_countries:
+            mask |= data["country"].isin(explicit_countries)
+            labels.extend(explicit_countries)
+        return data.loc[mask].copy(), ", ".join(labels)
+
     def crosswalk_table(data, left_columns, right_column, right_title_column=None):
         columns = [*left_columns, right_column]
         if right_title_column:
@@ -101,16 +193,22 @@ def _(alt, math, pd, pycountry, re):
                 + " — "
                 + pairs[right_title_column].astype("string")
             )
-        pairs["share_within_left"] = pairs["count"] / pairs.groupby(
-            "left_label", observed=True
-        )["count"].transform("sum")
+        pairs["share_within_left"] = pairs["count"] / pairs.groupby("left_label", observed=True)[
+            "count"
+        ].transform("sum")
         pairs = pairs.sort_values(
             ["left_label", "count", "right_label"], ascending=[True, False, True]
         ).reset_index(drop=True)
         pairs["rank"] = pairs.groupby("left_label", observed=True).cumcount() + 1
         return pairs
 
-    def make_share_chart(summary, title, top_n=None, baseline=None):
+    def make_share_chart(
+        summary,
+        title,
+        top_n=None,
+        baseline=None,
+        x_title="Share within selected country scope",
+    ):
         top = summary.head(top_n).copy() if top_n else summary.copy()
         if baseline is not None:
             base_shares = baseline[["display_label", "share"]].rename(
@@ -133,9 +231,7 @@ def _(alt, math, pd, pycountry, re):
         ]
         if baseline is not None:
             tooltip.append(
-                alt.Tooltip(
-                    "baseline_share:Q", title="Universe baseline share", format=".2%"
-                )
+                alt.Tooltip("baseline_share:Q", title="Universe baseline share", format=".2%")
             )
         base = alt.Chart(top).encode(
             y=alt.Y(
@@ -149,7 +245,7 @@ def _(alt, math, pd, pycountry, re):
         bars = base.mark_bar(color="#2563EB", opacity=0.85).encode(
             x=alt.X(
                 "share:Q",
-                title="Share of candidate new hires",
+                title=x_title,
                 axis=alt.Axis(format=".1%"),
                 scale=alt.Scale(domain=domain),
             )
@@ -160,9 +256,9 @@ def _(alt, math, pd, pycountry, re):
         layers = [bars, labels]
         if baseline is not None:
             layers.append(
-                base.mark_point(
-                    shape="diamond", filled=True, color="#B91C1C", size=90
-                ).encode(x=alt.X("baseline_share:Q"))
+                base.mark_point(shape="diamond", filled=True, color="#B91C1C", size=90).encode(
+                    x=alt.X("baseline_share:Q")
+                )
             )
         return (
             alt.layer(*layers)
@@ -199,9 +295,7 @@ def _(alt, math, pd, pycountry, re):
         ]
         if baseline_pairs is not None:
             tooltip.append(
-                alt.Tooltip(
-                    "baseline_share:Q", title="Universe baseline share", format=".2%"
-                )
+                alt.Tooltip("baseline_share:Q", title="Universe baseline share", format=".2%")
             )
         base = alt.Chart(selected).encode(
             y=alt.Y(
@@ -227,9 +321,9 @@ def _(alt, math, pd, pycountry, re):
         layers = [bars, labels]
         if baseline_pairs is not None:
             layers.append(
-                base.mark_point(
-                    shape="diamond", filled=True, color="#B91C1C", size=90
-                ).encode(x=alt.X("baseline_share:Q"))
+                base.mark_point(shape="diamond", filled=True, color="#B91C1C", size=90).encode(
+                    x=alt.X("baseline_share:Q")
+                )
             )
         return (
             alt.layer(*layers)
@@ -336,10 +430,14 @@ def _(alt, math, pd, pycountry, re):
 
     return (
         MISSING_LABEL,
+        available_country_options,
+        category_selector_options,
         country_iso3,
         crosswalk_table,
         distribution_table,
+        filter_country_scope,
         hierarchy_number,
+        joint_distribution_table,
         make_crosswalk_chart,
         make_share_chart,
         us_state_code,
@@ -423,9 +521,7 @@ def _(ds, hierarchy_number, mo, pd):
         fnh["start_month"] = pd.to_datetime(fnh[DATE_COLUMN], errors="coerce")
     else:
         fnh["start_month"] = (
-            pd.to_datetime(fnh[DATE_COLUMN], errors="coerce")
-            .dt.to_period("M")
-            .dt.to_timestamp()
+            pd.to_datetime(fnh[DATE_COLUMN], errors="coerce").dt.to_period("M").dt.to_timestamp()
         )
     if fnh.empty:
         raise ValueError("The focal-new-hire input contains no observations.")
@@ -445,6 +541,7 @@ def _(
     EXPECTED_RICS_COLUMNS,
     EXPECTED_ROLE_COLUMNS,
     MISSING_LABEL,
+    available_country_options,
     crosswalk_table,
     distribution_table,
     fnh,
@@ -452,7 +549,7 @@ def _(
     pd,
 ):
     CLASSIFICATION_LABELS = {
-        "onet_code": "O*NET code and title",
+        "onet_code": "ONET code and title",
         "naics_code": "NAICS code and description",
         **{
             column: f"Revelio role K{hierarchy_number(column):,}"
@@ -464,6 +561,20 @@ def _(
         },
     }
     title_columns = {"onet_code": "onet_title", "naics_code": "naics_description"}
+    country_selector_options = available_country_options(fnh)
+    industry_selector_options = {
+        CLASSIFICATION_LABELS[column]: column for column in ("naics_code", *AVAILABLE_RICS_COLUMNS)
+    }
+    occupation_selector_options = {
+        CLASSIFICATION_LABELS[column]: column for column in ("onet_code", *AVAILABLE_ROLE_COLUMNS)
+    }
+    default_industry_column = (
+        "rics_k400"
+        if "rics_k400" in AVAILABLE_RICS_COLUMNS
+        else AVAILABLE_RICS_COLUMNS[-1]
+        if AVAILABLE_RICS_COLUMNS
+        else "naics_code"
+    )
     classification_columns = (
         "onet_code",
         *AVAILABLE_ROLE_COLUMNS,
@@ -483,9 +594,7 @@ def _(
         _role_crosswalk_rows = fnh.loc[:, _role_crosswalk_columns].copy()
         for _column in _role_crosswalk_columns:
             _role_crosswalk_rows[_column] = (
-                _role_crosswalk_rows[_column]
-                .fillna(MISSING_LABEL)
-                .astype("string")
+                _role_crosswalk_rows[_column].fillna(MISSING_LABEL).astype("string")
             )
         _role_crosswalk_rows = _role_crosswalk_rows.drop_duplicates()
         _role_shares = distribution_tables["role_k1500"][["value", "share"]]
@@ -496,31 +605,24 @@ def _(
             how="left",
             validate="many_to_one",
         )
-        _role_crosswalk_ordered["O*NET code and title"] = (
-            _role_crosswalk_ordered["onet_code"]
-            + " — "
-            + _role_crosswalk_ordered["onet_title"]
+        _role_crosswalk_ordered["ONET code and title"] = (
+            _role_crosswalk_ordered["onet_code"] + " — " + _role_crosswalk_ordered["onet_title"]
         )
         _role_crosswalk_ordered = _role_crosswalk_ordered.sort_values(
-            ["share", "role_k1500", "O*NET code and title"],
+            ["share", "role_k1500", "ONET code and title"],
             ascending=[False, True, True],
         )
-        role_onet_crosswalk = (
-            _role_crosswalk_ordered.loc[
-                :, [*AVAILABLE_ROLE_COLUMNS, "O*NET code and title"]
-            ]
-            .reset_index(drop=True)
-        )
+        role_onet_crosswalk = _role_crosswalk_ordered.loc[
+            :, [*AVAILABLE_ROLE_COLUMNS, "ONET code and title"]
+        ].reset_index(drop=True)
         _role_mapping_counts = (
-            _role_crosswalk_rows.loc[
-                _role_crosswalk_rows["role_k1500"] != MISSING_LABEL
-            ].groupby("role_k1500", observed=True).size()
+            _role_crosswalk_rows.loc[_role_crosswalk_rows["role_k1500"] != MISSING_LABEL]
+            .groupby("role_k1500", observed=True)
+            .size()
         )
         role_onet_cardinality_violations = int((_role_mapping_counts > 1).sum())
     else:
-        role_onet_crosswalk = pd.DataFrame(
-            columns=[*AVAILABLE_ROLE_COLUMNS, "O*NET code and title"]
-        )
+        role_onet_crosswalk = pd.DataFrame(columns=[*AVAILABLE_ROLE_COLUMNS, "ONET code and title"])
         role_onet_cardinality_violations = 0
     finest_rics_column = AVAILABLE_RICS_COLUMNS[-1] if AVAILABLE_RICS_COLUMNS else None
     rics_naics_pairs = (
@@ -541,12 +643,9 @@ def _(
                 "Nonmissing categories": int(
                     summary.loc[summary["value"] != MISSING_LABEL, "value"].nunique()
                 ),
-                "Missing rows": int(
-                    summary.loc[summary["value"] == MISSING_LABEL, "count"].sum()
-                ),
+                "Missing rows": int(summary.loc[summary["value"] == MISSING_LABEL, "count"].sum()),
                 "Missing share": float(
-                    summary.loc[summary["value"] == MISSING_LABEL, "count"].sum()
-                    / len(fnh)
+                    summary.loc[summary["value"] == MISSING_LABEL, "count"].sum() / len(fnh)
                 ),
             }
             for column, summary in distribution_tables.items()
@@ -558,19 +657,13 @@ def _(
         *EXPECTED_ROLE_COLUMNS,
         *EXPECTED_RICS_COLUMNS,
     ]
-    expected.extend(
-        ["naics_code", "naics_description", "country", "state", "seniority"]
-    )
+    expected.extend(["naics_code", "naics_description", "country", "state", "seniority"])
     schema_report = pd.DataFrame(
         [
             {
                 "Variable": column,
-                "Status": "Available"
-                if column in fnh.columns
-                else "Absent from input schema",
-                "Missing rows": int(fnh[column].isna().sum())
-                if column in fnh.columns
-                else pd.NA,
+                "Status": "Available" if column in fnh.columns else "Absent from input schema",
+                "Missing rows": int(fnh[column].isna().sum()) if column in fnh.columns else pd.NA,
                 "Missing share": (
                     float(fnh[column].isna().mean()) if column in fnh.columns else pd.NA
                 ),
@@ -601,17 +694,22 @@ def _(
         "distinct_countries": int(fnh["country"].nunique(dropna=True)),
     }
     return (
+        CLASSIFICATION_LABELS,
         basic_numbers,
         classification_stats,
-        distribution_tables,
+        country_selector_options,
+        default_industry_column,
         finest_rics_column,
+        industry_selector_options,
         naics_rics_pairs,
         naics_title_diagnostic,
+        occupation_selector_options,
         onet_title_diagnostic,
         rics_naics_pairs,
         role_onet_cardinality_violations,
         role_onet_crosswalk,
         schema_report,
+        title_columns,
     )
 
 
@@ -634,20 +732,17 @@ def _(
                 """
                 The sample construction process is:
 
-                1. Keep employment spells in the two-digit occupation groups **17:
-                   Architecture and Engineering occupations** and **19: Life, Physical,
-                   and Social Science occupations**.
-                2. Retain spells starting from **January 2021 through December 2023**.
+                1. Keep employment spells in the two-digit occupation groups **17: Architecture and Engineering occupations** and **19: Life, Physical, and Social Science occupations**.
+                2. Retain spells starting from January 2021 through December 2023.
                 3. Exclude spells with missing geography or job-title information.
                 4. Exclude internship positions.
-                5. Retain one employment spell within each user-company cell. This is the
-                   **universe sample of candidate focal new hires**.
+                5. Retain one employment spell within each user-company cell. This is the **universe sample of candidate focal new hires**.
 
-                This is the broadest sample of the new hires. Further restrictions on
-                industries and occupations will be guided by the summary statistics below.
-                The sample is at the user-company level, so one user can appear multiple
-                times as a new hire at different companies. All summary statistics are
-                simple averages over these user-company observations.
+                Notes:
+                - This is the broadest sample of the new hires.
+                - Further restrictions on industries and occupations will be guided by the summary statistics below.
+                - The sample is at the user-company level, so one user can appear multiple times as a new hire at different companies.
+                - All summary statistics are simple averages over these user-company observations.
                 """
             ),
             mo.md(
@@ -671,7 +766,7 @@ def _(
                         schema_report, pagination=False, show_column_summaries=False
                     ),
                     "Label diagnostics": mo.md(
-                        f"O*NET codes with multiple titles: **{onet_conflicts:,}**; "
+                        f"ONET codes with multiple titles: **{onet_conflicts:,}**; "
                         f"NAICS codes with multiple descriptions: **{naics_conflicts:,}**."
                     ),
                 }
@@ -687,23 +782,64 @@ def _(mo):
     mo.md(r"""
     ## 2. The occupation distribution
 
-    Shares are calculated over all candidate focal new hires, including observations with
-    missing classification values.
+    - How does Revelio assign an occupation to a user's employment spell?
+        - Revelio first construct the user's occupation (with different levels of aggregation: `role_k50`, `role_k150`, `role_k300`, `role_k500`, `role_k1000`, `role_k1500`) based on their own occupation classification method (which is not public).
+        - Then Revelio constructs a crosswalk mapping from their own occupation classification (`role_k1500`) to ONET occupations.
+    - This implies:
+        - Each occupation in `role_k1500` is mapped to 1 and only 1 ONET occupation; while one ONET occupation could be mapped to multiple roles in `role_k1500`.
+        - For the series of Revelio's own occupation classifications, a role in a finer classification (e.g., in `role_k500`) is mapped to 1 and only 1 role in a broader classification (e.g., in `role_k50`); while one role in a broader classification is mapped to multiple roles in a finer classification.
+    - **The main message from results in this section is that Revelio's occupation classifications are kind of messy.**
+        - It is important to understand the limitations of the mapping from Revelio's own occupation classifications to ONET occupations.
+        - It helps reveal whether a prominent category is meaningful or an unpleasant result from the mapping itself.
     """)
     return
 
 
 @app.cell
-def _(distribution_tables, make_share_chart, mo):
-    onet_summary = distribution_tables["onet_code"]
-    _chart = make_share_chart(onet_summary, "O*NET occupation distribution")
+def _(country_selector_options, mo):
+    onet_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    return (onet_country_selector,)
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    make_share_chart,
+    mo,
+    onet_country_selector,
+):
+    _scope, _scope_label = filter_country_scope(fnh, onet_country_selector.value)
+    onet_summary = distribution_table(_scope, "onet_code", "onet_title")
+    _chart = make_share_chart(
+        onet_summary,
+        f"ONET occupation distribution — {_scope_label}",
+    )
     mo.vstack(
         [
-            mo.md("### 2.1. O*NET occupation distribution"),
+            mo.md(
+                """
+                ### 2.1. ONET occupation distribution
+
+                - We have a very large share of "Astronomers" and "Historians". 
+                - This is related to the specific procedures how Revelio assigns the ONET occupation codes. 
+                - I will talk more on this point later. But in short:
+                    - **Do not read the bars as evidence that a worker classified as a "historian" in ONET is literally a historian.**
+                    - Unexpected occupation names should be traced through the crosswalks below and checked against reported job titles before they are used to define the focal occupation sample.
+                    - From my own observations, unexpected ONET occupations often indicate measurement errors.
+                """
+            ),
+            onet_country_selector,
             _chart,
             mo.accordion(
                 {
-                    "View all O*NET occupation counts": mo.ui.table(
+                    "View all ONET occupation counts": mo.ui.table(
                         onet_summary,
                         pagination=True,
                         page_size=20,
@@ -718,7 +854,13 @@ def _(distribution_tables, make_share_chart, mo):
 
 
 @app.cell
-def _(AVAILABLE_ROLE_COLUMNS, mo):
+def _(AVAILABLE_ROLE_COLUMNS, country_selector_options, mo):
+    role_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
     role_variable_selector = mo.ui.dropdown(
         options=list(AVAILABLE_ROLE_COLUMNS),
         value="role_k1500" if "role_k1500" in AVAILABLE_ROLE_COLUMNS else None,
@@ -727,30 +869,45 @@ def _(AVAILABLE_ROLE_COLUMNS, mo):
     role_top_n_selector = mo.ui.number(
         start=1, stop=1000, step=1, value=50, label="Number of top occupations"
     )
-    return role_top_n_selector, role_variable_selector
+    return role_country_selector, role_top_n_selector, role_variable_selector
 
 
 @app.cell
 def _(
-    distribution_tables,
+    distribution_table,
+    filter_country_scope,
+    fnh,
     make_share_chart,
     mo,
+    role_country_selector,
     role_top_n_selector,
     role_variable_selector,
 ):
     role_variable = role_variable_selector.value
-    role_summary = distribution_tables[role_variable]
+    _scope, _scope_label = filter_country_scope(fnh, role_country_selector.value)
+    role_summary = distribution_table(_scope, role_variable)
     role_top_n = max(1, int(role_top_n_selector.value))
     _chart = make_share_chart(
-        role_summary, f"Top {role_top_n} occupations in {role_variable}", role_top_n
+        role_summary,
+        f"Top {role_top_n} occupations in {role_variable} — {_scope_label}",
+        role_top_n,
     )
     mo.vstack(
         [
-            mo.md("### 2.2. Revelio's own occupation distribution"),
+            mo.md(
+                """
+                ### 2.2. Revelio's own occupation distribution
+
+                - From `role_k50` to `role_k1500`, an occupation's name become more ambiguous.
+                - It is often hard to judge an occupation's exact nature simply from its name.
+                - This is a limitation inherited in Revelio's standardization of a user's occupation variable.
+                """
+            ),
             mo.hstack(
-                [role_variable_selector, role_top_n_selector],
+                [role_country_selector, role_variable_selector, role_top_n_selector],
                 justify="start",
                 gap=2,
+                widths="equal",
             ),
             _chart,
             mo.accordion(
@@ -770,29 +927,39 @@ def _(
 
 
 @app.cell
-def _(AVAILABLE_ROLE_COLUMNS, mo):
+def _(AVAILABLE_ROLE_COLUMNS, country_selector_options, mo):
+    onet_role_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
     onet_role_variable_selector = mo.ui.dropdown(
         options=list(AVAILABLE_ROLE_COLUMNS),
         value="role_k1500" if "role_k1500" in AVAILABLE_ROLE_COLUMNS else None,
         label="Revelio occupation variable",
     )
-    return (onet_role_variable_selector,)
+    return onet_role_country_selector, onet_role_variable_selector
 
 
 @app.cell
 def _(
     MISSING_LABEL,
     crosswalk_table,
+    filter_country_scope,
     fnh,
     mo,
+    onet_role_country_selector,
     onet_role_variable_selector,
     pd,
 ):
     onet_role_variable = onet_role_variable_selector.value
+    _scope, onet_role_scope_label = filter_country_scope(
+        fnh,
+        onet_role_country_selector.value,
+    )
     onet_role_pairs = (
-        crosswalk_table(
-            fnh, ["onet_code", "onet_title"], onet_role_variable
-        )
+        crosswalk_table(_scope, ["onet_code", "onet_title"], onet_role_variable)
         if onet_role_variable in fnh.columns
         else pd.DataFrame()
     )
@@ -808,17 +975,24 @@ def _(
             options=_choices,
             value=next(iter(_choices)) if _choices else None,
             searchable=True,
-            label="O*NET occupation",
+            label="ONET occupation",
             full_width=True,
         )
-    return onet_role_pairs, onet_role_selector, onet_role_variable
+    return (
+        onet_role_pairs,
+        onet_role_scope_label,
+        onet_role_selector,
+        onet_role_variable,
+    )
 
 
 @app.cell
 def _(
     make_crosswalk_chart,
     mo,
+    onet_role_country_selector,
     onet_role_pairs,
+    onet_role_scope_label,
     onet_role_selector,
     onet_role_variable,
     onet_role_variable_selector,
@@ -826,20 +1000,19 @@ def _(
     _control = (
         onet_role_selector
         if onet_role_selector is not None
-        else mo.callout(
-            mo.md(f"`{onet_role_variable}` is unavailable."), kind="warn"
-        )
+        else mo.callout(mo.md(f"`{onet_role_variable}` is unavailable."), kind="warn")
     )
     _items = [
-        mo.md("### 2.3. Crosswalk from O*NET to Revelio's own occupation"),
-        mo.md(
-            "Select a Revelio occupation variable and an O*NET occupation to see "
-            "the corresponding role composition."
-        ),
+        mo.md("### 2.3. Crosswalk from ONET to Revelio's own occupation"),
+        mo.md(R"""
+            - This is the crosswalk from ONET to Revelio's own occupation classifications.
+            - An expected composition often indicates a systematic crosswalk problem.
+            """),
         mo.hstack(
-            [onet_role_variable_selector, _control],
+            [onet_role_country_selector, onet_role_variable_selector, _control],
             justify="start",
             gap=2,
+            widths="equal",
         ),
     ]
     if onet_role_selector is not None:
@@ -847,7 +1020,7 @@ def _(
         _chart = make_crosswalk_chart(
             onet_role_pairs,
             _selected,
-            f"Revelio {onet_role_variable} composition of {_selected}",
+            f"Revelio {onet_role_variable} composition of {_selected} — {onet_role_scope_label}",
         )
         _items.append(_chart)
     mo.vstack(_items, gap=1)
@@ -864,17 +1037,17 @@ def _(mo, role_onet_cardinality_violations, role_onet_crosswalk):
                 mo.md(
                     f"**Warning:** {role_onet_cardinality_violations:,} nonmissing "
                     "`role_k1500` categories map to more than one combination of "
-                    "Revelio hierarchy values and O*NET occupation."
+                    "Revelio hierarchy values and ONET occupation."
                 ),
                 kind="warn",
             )
         else:
-            _diagnostic = mo.md(
-                "Each nonmissing `role_k1500` category maps to exactly one combination "
-                "of Revelio occupation hierarchy values and O*NET occupation in the "
-                "current sample. Rows are ordered by the `role_k1500` category's share "
-                "of candidate focal new hires, from largest to smallest."
-            )
+            _diagnostic = mo.md(R"""
+                - This is the crosswalk from Revelio's own occupation classifications to ONET.
+                - Each occupation in `role_k1500` maps to 1 and only 1 ONET occupation; while 1 ONET occupation could be mapped to multiple roles in `role_k1500`.
+                - The table is ordered by the `role_k1500` category's share of candidate focal new hires, from largest to smallest.
+                - Main message: **Revelio's own occupation classifications are messy and often don't match to their literal meaning.**
+                """)
         _content = mo.vstack(
             [
                 _diagnostic,
@@ -889,7 +1062,7 @@ def _(mo, role_onet_cardinality_violations, role_onet_crosswalk):
         )
     mo.vstack(
         [
-            mo.md("### 2.4. Crosswalk from Revelio's own occupation to O*NET"),
+            mo.md("### 2.4. Crosswalk from Revelio's own occupation to ONET"),
             _content,
         ],
         gap=1,
@@ -900,34 +1073,83 @@ def _(mo, role_onet_cardinality_violations, role_onet_crosswalk):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 3. The industry distribution
+    My suggestions on occupation classifications:
 
-    NAICS and Revelio's own industry classifications are shown separately because they
-    need not produce the same categories or composition.
+    - We shouldn't use a single Revelio's occupation variable for sample construction.
+        - The ONET occupations are very unstable (recall the Astronomers and Historians).
+        - We shouldn't either start with Revelio's own occupation classifications, because these variables often have ambiguous names (we cannot tell the exact nature of an occupation simply from its name itself).
+    - The best workflow is:
+        - We start from a selected industry (or a set of industries) because Revelio's industry classifications seem to be more consistent across NAICS and their own industry classification system.
+        - **Next, using the results in Section 4 of this report, we select occupations that have relatively large share within the selected industry.**
+        - Optionally, we can do further restrictions based on users' reported job titles for robustness checks.
+            - For example, exclude those new hires whose self-reported job titles are clearly not what we want.
+            - For example, we keep only the job titles within the ONET codes that frequently show up in the sample.
+    - In summary, these are limitations inherited in Revelio's data, and we need to carefully deal with measurement errors of users' occupations.
     """)
     return
 
 
 @app.cell
 def _(mo):
-    naics_top_n_selector = mo.ui.number(
-        start=1, stop=2000, step=1, value=50, label="Number of top NAICS industries"
-    )
-    return (naics_top_n_selector,)
+    mo.md(r"""
+    ## 3. The industry distribution
+
+    - There are 2 main sets of variables indicating a user's industry.
+        - `naics`: The NAICS industry classifications at 6 digits (used mainly in North America: US, Canada).
+        - `rics_k50`, `rics_k200`, `rics_k400`: Revelio's own industry classifications (at different levels of aggregation).
+    - Revelio doesn't document how it constructs these industry variables.
+    - Unlike occupation classifications (where we know ONET codes are derived from Revelio's own occupation classifications), **there is no clear map between NAICS industries and Revelio's own industries**.
+        - For example, "Pharmaceutical Preparation Manufacturing" (in NAICS) maps to multiple industries in `rics_k400`: Pharmaceuticals (54.5%); Pharmaceutical Manufacturing (32.7%); Biotechnology and Life Sciences (3.7%); Life Sciences and Diagnostics (2.5%) Biopharmaceuticals and Healthcare Services (1.8%).
+        - In the other way around, "Pharmaceuticals" (in `rics_k400`) maps to multiple NAICS industries: Pharmaceutical Preparation Manufacturing (70.5%); Biological Product (except Diagnostics) Manufacturing (13.7%); Research and Development in Biotechnology (except Nanobiotechnology) (6.1%); Surgical and Medical Instrument Manufacturing (5.3%).
+    - The good thing is that the Revelio's own industry classifications are clear and intuitive enough, so I suggest we start from them.
+    """)
+    return
 
 
 @app.cell
-def _(distribution_tables, make_share_chart, mo, naics_top_n_selector):
-    _summary = distribution_tables["naics_code"]
+def _(country_selector_options, mo):
+    naics_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    naics_top_n_selector = mo.ui.number(
+        start=1, stop=2000, step=1, value=50, label="Number of top NAICS industries"
+    )
+    return naics_country_selector, naics_top_n_selector
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    make_share_chart,
+    mo,
+    naics_country_selector,
+    naics_top_n_selector,
+):
+    _scope, _scope_label = filter_country_scope(fnh, naics_country_selector.value)
+    _summary = distribution_table(_scope, "naics_code", "naics_description")
     _chart = make_share_chart(
         _summary,
-        "Top NAICS industries",
+        f"Top NAICS industries — {_scope_label}",
         int(naics_top_n_selector.value),
     )
     mo.vstack(
         [
-            mo.md("### 3.1. NAICS distribution"),
-            naics_top_n_selector,
+            mo.md(
+                """
+                ### 3.1. NAICS distribution
+                """
+            ),
+            mo.hstack(
+                [naics_country_selector, naics_top_n_selector],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
             _chart,
             mo.accordion(
                 {
@@ -946,7 +1168,13 @@ def _(distribution_tables, make_share_chart, mo, naics_top_n_selector):
 
 
 @app.cell
-def _(AVAILABLE_RICS_COLUMNS, mo):
+def _(AVAILABLE_RICS_COLUMNS, country_selector_options, mo):
+    rics_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
     rics_variable_selector = mo.ui.dropdown(
         options=list(AVAILABLE_RICS_COLUMNS),
         value="rics_k400" if "rics_k400" in AVAILABLE_RICS_COLUMNS else None,
@@ -955,32 +1183,44 @@ def _(AVAILABLE_RICS_COLUMNS, mo):
     rics_top_n_selector = mo.ui.number(
         start=1, stop=2000, step=1, value=50, label="Number of top Revelio industries"
     )
-    return rics_top_n_selector, rics_variable_selector
+    return rics_country_selector, rics_top_n_selector, rics_variable_selector
 
 
 @app.cell
 def _(
-    distribution_tables,
+    distribution_table,
+    filter_country_scope,
+    fnh,
     make_share_chart,
     mo,
+    rics_country_selector,
     rics_top_n_selector,
     rics_variable_selector,
 ):
     _variable = rics_variable_selector.value
     _top_n = int(rics_top_n_selector.value)
-    _summary = distribution_tables[_variable]
+    _scope, _scope_label = filter_country_scope(fnh, rics_country_selector.value)
+    _summary = distribution_table(_scope, _variable)
     _chart = make_share_chart(
         _summary,
-        f"Top {_top_n} industries in {_variable}",
+        f"Top {_top_n} industries in {_variable} — {_scope_label}",
         _top_n,
     )
     mo.vstack(
         [
-            mo.md("### 3.2. Revelio's own industry distribution"),
+            mo.md(
+                """
+                ### 3.2. Revelio's own industry distribution
+
+                - The `rics_k400` view is a practical starting point for defining industries.
+                - NAICS can be used for robustness checks to see whether conclusions depend on the proprietary Revelio classification.
+                """
+            ),
             mo.hstack(
-                [rics_variable_selector, rics_top_n_selector],
+                [rics_country_selector, rics_variable_selector, rics_top_n_selector],
                 justify="start",
                 gap=2,
+                widths="equal",
             ),
             _chart,
             mo.accordion(
@@ -1000,7 +1240,13 @@ def _(
 
 
 @app.cell
-def _(MISSING_LABEL, mo, naics_rics_pairs):
+def _(MISSING_LABEL, country_selector_options, mo, naics_rics_pairs):
+    naics_rics_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
     if naics_rics_pairs.empty:
         naics_rics_selector = None
     else:
@@ -1016,15 +1262,18 @@ def _(MISSING_LABEL, mo, naics_rics_pairs):
             label="NAICS code and description",
             full_width=True,
         )
-    return (naics_rics_selector,)
+    return naics_rics_country_selector, naics_rics_selector
 
 
 @app.cell
 def _(
+    crosswalk_table,
+    filter_country_scope,
     finest_rics_column,
+    fnh,
     make_crosswalk_chart,
     mo,
-    naics_rics_pairs,
+    naics_rics_country_selector,
     naics_rics_selector,
 ):
     _control = (
@@ -1034,21 +1283,35 @@ def _(
     )
     _items = [
         mo.md("### 3.3. Crosswalk from NAICS to Revelio's own industry"),
-        mo.md(
-            "Select a NAICS category to see its finest Revelio industry composition."
+        mo.md(R"""
+            - Select a NAICS category to see its finest Revelio industry composition.
+            - One-to-many mappings show that a narrow NAICS label translates into multiple Revelio's industries.
+            - The displayed conditional shares can quantify that measurement ambiguity.
+            """),
+        mo.hstack(
+            [naics_rics_country_selector, _control],
+            justify="start",
+            gap=2,
+            widths="equal",
         ),
-        _control,
     ]
     if naics_rics_selector is not None:
         _selected = naics_rics_selector.value
-        _chart = make_crosswalk_chart(
-            naics_rics_pairs,
-            _selected,
-            f"{finest_rics_column} composition of {_selected}",
+        _scope, _scope_label = filter_country_scope(
+            fnh,
+            naics_rics_country_selector.value,
         )
-        _selected_pairs = naics_rics_pairs.loc[
-            naics_rics_pairs["left_label"] == _selected
-        ].copy()
+        _pairs = crosswalk_table(
+            _scope,
+            ["naics_code", "naics_description"],
+            finest_rics_column,
+        )
+        _chart = make_crosswalk_chart(
+            _pairs,
+            _selected,
+            f"{finest_rics_column} composition of {_selected} — {_scope_label}",
+        )
+        _selected_pairs = _pairs.loc[_pairs["left_label"] == _selected].copy()
         _items.extend(
             [
                 _chart,
@@ -1069,7 +1332,19 @@ def _(
 
 
 @app.cell
-def _(MISSING_LABEL, finest_rics_column, mo, rics_naics_pairs):
+def _(
+    MISSING_LABEL,
+    country_selector_options,
+    finest_rics_column,
+    mo,
+    rics_naics_pairs,
+):
+    rics_naics_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
     if rics_naics_pairs.empty:
         rics_naics_selector = None
     else:
@@ -1085,15 +1360,18 @@ def _(MISSING_LABEL, finest_rics_column, mo, rics_naics_pairs):
             label=finest_rics_column,
             full_width=True,
         )
-    return (rics_naics_selector,)
+    return rics_naics_country_selector, rics_naics_selector
 
 
 @app.cell
 def _(
+    crosswalk_table,
+    filter_country_scope,
     finest_rics_column,
+    fnh,
     make_crosswalk_chart,
     mo,
-    rics_naics_pairs,
+    rics_naics_country_selector,
     rics_naics_selector,
 ):
     _control = (
@@ -1104,20 +1382,36 @@ def _(
     _items = [
         mo.md("### 3.4. Crosswalk from Revelio's own industry to NAICS"),
         mo.md(
-            f"Select a `{finest_rics_column}` category to see its NAICS composition."
+            rf"""
+            - Select a `{finest_rics_column}` category to see its NAICS composition.
+            - A dispersed NAICS composition suggests that we should do NAICS-based restrictions as robustness checks.
+            """
         ),
-        _control,
+        mo.hstack(
+            [rics_naics_country_selector, _control],
+            justify="start",
+            gap=2,
+            widths="equal",
+        ),
     ]
     if rics_naics_selector is not None:
         _selected = rics_naics_selector.value
-        _chart = make_crosswalk_chart(
-            rics_naics_pairs,
-            _selected,
-            f"NAICS composition of {_selected} ({finest_rics_column})",
+        _scope, _scope_label = filter_country_scope(
+            fnh,
+            rics_naics_country_selector.value,
         )
-        _selected_pairs = rics_naics_pairs.loc[
-            rics_naics_pairs["left_label"] == _selected
-        ].copy()
+        _pairs = crosswalk_table(
+            _scope,
+            [finest_rics_column],
+            "naics_code",
+            "naics_description",
+        )
+        _chart = make_crosswalk_chart(
+            _pairs,
+            _selected,
+            f"NAICS composition of {_selected} ({finest_rics_column}) — {_scope_label}",
+        )
+        _selected_pairs = _pairs.loc[_pairs["left_label"] == _selected].copy()
         _items.extend(
             [
                 _chart,
@@ -1138,6 +1432,466 @@ def _(
 
 
 @app.cell
+def _(
+    CLASSIFICATION_LABELS,
+    country_selector_options,
+    default_industry_column,
+    industry_selector_options,
+    mo,
+    occupation_selector_options,
+):
+    industry_occupation_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    industry_occupation_industry_selector = mo.ui.dropdown(
+        options=industry_selector_options,
+        value=CLASSIFICATION_LABELS[default_industry_column],
+        label="Industry variable",
+        full_width=True,
+    )
+    industry_occupation_occupation_selector = mo.ui.dropdown(
+        options=occupation_selector_options,
+        value=CLASSIFICATION_LABELS["onet_code"],
+        label="Occupation variable",
+        full_width=True,
+    )
+    industry_occupation_top_n_selector = mo.ui.number(
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of top industry-occupation combinations",
+    )
+    return (
+        industry_occupation_country_selector,
+        industry_occupation_industry_selector,
+        industry_occupation_occupation_selector,
+        industry_occupation_top_n_selector,
+    )
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 4. Industry-occupation distribution
+
+    - In this section, I document the joint and marginal distribution of industry-occupation combinations among the universe sample of candidate focal new hires.
+    - Based on my current understanding of the data, an intuitive way to select the final analysis sample is:
+        - We start with an industry that is patents-intensive (e.g., BioPharma based on Revelio's own industry classifications `rics_k400`) -- this part of evidence will show in the next part about the match rates.
+        - Next, using summary statistics from this section, we select ONET occupations that constitute most of the scientists/engineers in the selected industry.
+    - In what follows:
+        - I will first document the joint distribution of industry-occupation combinations.
+        - Next, I will document the occupation distribution within a selected industry (or a set of industries).
+        - Finally, I will document the industry distribution within a selected occupation (or a set of occupations).
+    """)
+    return
+
+
+@app.cell
+def _(
+    filter_country_scope,
+    fnh,
+    industry_occupation_country_selector,
+    industry_occupation_industry_selector,
+    industry_occupation_occupation_selector,
+    industry_occupation_top_n_selector,
+    joint_distribution_table,
+    make_share_chart,
+    mo,
+    title_columns,
+):
+    _industry_column = industry_occupation_industry_selector.value
+    _occupation_column = industry_occupation_occupation_selector.value
+    _top_n = max(1, int(industry_occupation_top_n_selector.value))
+    _scope, _scope_label = filter_country_scope(
+        fnh,
+        industry_occupation_country_selector.value,
+    )
+    _summary = joint_distribution_table(
+        _scope,
+        _industry_column,
+        _occupation_column,
+        title_columns,
+    )
+    _chart = make_share_chart(
+        _summary,
+        f"Top {_top_n} industry-occupation combinations — {_scope_label}",
+        _top_n,
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### 4.1. Joint industry-occupation distribution
+
+                - Each bar reports the share of the universe sample in an industry-occupation combination within the selected country scope.
+                - Joint cells reveal concentrations that can be hidden in the separate occupation and industry distributions.
+                - The Top-N control changes the number of combinations displayed, not the denominator used to calculate shares.
+                """
+            ),
+            mo.hstack(
+                [
+                    industry_occupation_country_selector,
+                    industry_occupation_top_n_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            mo.hstack(
+                [
+                    industry_occupation_industry_selector,
+                    industry_occupation_occupation_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            _chart,
+            mo.accordion(
+                {
+                    "View industry-occupation combinations": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
+
+
+@app.cell
+def _(
+    CLASSIFICATION_LABELS,
+    country_selector_options,
+    default_industry_column,
+    industry_selector_options,
+    mo,
+    occupation_selector_options,
+):
+    occupation_within_industry_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    occupation_within_industry_industry_variable_selector = mo.ui.dropdown(
+        options=industry_selector_options,
+        value=CLASSIFICATION_LABELS[default_industry_column],
+        label="Industry variable",
+        full_width=True,
+    )
+    occupation_within_industry_occupation_variable_selector = mo.ui.dropdown(
+        options=occupation_selector_options,
+        value=CLASSIFICATION_LABELS["onet_code"],
+        label="Occupation variable",
+        full_width=True,
+    )
+    occupation_within_industry_top_n_selector = mo.ui.number(
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of top occupations",
+    )
+    return (
+        occupation_within_industry_country_selector,
+        occupation_within_industry_industry_variable_selector,
+        occupation_within_industry_occupation_variable_selector,
+        occupation_within_industry_top_n_selector,
+    )
+
+
+@app.cell
+def _(
+    category_selector_options,
+    fnh,
+    mo,
+    occupation_within_industry_industry_variable_selector,
+    title_columns,
+):
+    _industry_column = occupation_within_industry_industry_variable_selector.value
+    _industry_options = category_selector_options(
+        fnh,
+        _industry_column,
+        title_columns.get(_industry_column),
+    )
+    _default_industries = (
+        "Biotechnology and Life Sciences",
+        "Pharmaceutical Manufacturing",
+        "Pharmaceuticals",
+    )
+    _default_labels = [
+        industry for industry in _default_industries if industry in _industry_options
+    ]
+    occupation_within_industry_industry_selector = mo.ui.multiselect(
+        options=_industry_options,
+        value=_default_labels,
+        label="Industries",
+        full_width=True,
+    )
+    return (occupation_within_industry_industry_selector,)
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    make_share_chart,
+    mo,
+    occupation_within_industry_country_selector,
+    occupation_within_industry_industry_selector,
+    occupation_within_industry_industry_variable_selector,
+    occupation_within_industry_occupation_variable_selector,
+    occupation_within_industry_top_n_selector,
+    title_columns,
+):
+    _industry_column = occupation_within_industry_industry_variable_selector.value
+    _occupation_column = occupation_within_industry_occupation_variable_selector.value
+    _selected_industries = tuple(occupation_within_industry_industry_selector.value or ())
+    _top_n = max(1, int(occupation_within_industry_top_n_selector.value))
+    _country_scope, _scope_label = filter_country_scope(
+        fnh,
+        occupation_within_industry_country_selector.value,
+    )
+    _selected_scope = _country_scope.loc[
+        _country_scope[_industry_column].isin(_selected_industries)
+    ].copy()
+    _summary = distribution_table(
+        _selected_scope,
+        _occupation_column,
+        title_columns.get(_occupation_column),
+    )
+    _figure = (
+        make_share_chart(
+            _summary,
+            f"Top {_top_n} occupations within the selected industry set — {_scope_label}",
+            _top_n,
+            x_title="Share within selected industry set",
+        )
+        if _selected_industries
+        else mo.callout(mo.md("Select at least one industry."), kind="warn")
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### 4.2. Conditional occupation distribution within an industry
+
+                - The selected industries are pooled before calculating the occupation shares.
+                - Each bar reports an occupation's share of universe-sample hires in the selected country and industry set.
+                """
+            ),
+            mo.hstack(
+                [
+                    occupation_within_industry_country_selector,
+                    occupation_within_industry_top_n_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            mo.hstack(
+                [
+                    occupation_within_industry_industry_variable_selector,
+                    occupation_within_industry_occupation_variable_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            occupation_within_industry_industry_selector,
+            _figure,
+            mo.accordion(
+                {
+                    "View occupations within selected industries": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
+
+
+@app.cell
+def _(
+    CLASSIFICATION_LABELS,
+    country_selector_options,
+    default_industry_column,
+    industry_selector_options,
+    mo,
+    occupation_selector_options,
+):
+    industry_within_occupation_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    industry_within_occupation_industry_variable_selector = mo.ui.dropdown(
+        options=industry_selector_options,
+        value=CLASSIFICATION_LABELS[default_industry_column],
+        label="Industry variable",
+        full_width=True,
+    )
+    industry_within_occupation_occupation_variable_selector = mo.ui.dropdown(
+        options=occupation_selector_options,
+        value=CLASSIFICATION_LABELS["onet_code"],
+        label="Occupation variable",
+        full_width=True,
+    )
+    industry_within_occupation_top_n_selector = mo.ui.number(
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of top industries",
+    )
+    return (
+        industry_within_occupation_country_selector,
+        industry_within_occupation_industry_variable_selector,
+        industry_within_occupation_occupation_variable_selector,
+        industry_within_occupation_top_n_selector,
+    )
+
+
+@app.cell
+def _(
+    category_selector_options,
+    fnh,
+    industry_within_occupation_occupation_variable_selector,
+    mo,
+    title_columns,
+):
+    _occupation_column = industry_within_occupation_occupation_variable_selector.value
+    _occupation_options = category_selector_options(
+        fnh,
+        _occupation_column,
+        title_columns.get(_occupation_column),
+    )
+    _default_occupation_titles = (
+        "Microbiologists",
+        "Chemical Engineers",
+        "Bioengineers and Biomedical Engineers",
+        "Biochemists and Biophysicists",
+        "Chemists",
+        "Animal Scientists",
+    )
+    _default_labels = [
+        option_label
+        for title in _default_occupation_titles
+        for option_label in _occupation_options
+        if option_label == title or option_label.endswith(f" — {title}")
+    ]
+    industry_within_occupation_occupation_selector = mo.ui.multiselect(
+        options=_occupation_options,
+        value=_default_labels,
+        label="Occupations",
+        full_width=True,
+    )
+    return (industry_within_occupation_occupation_selector,)
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    industry_within_occupation_country_selector,
+    industry_within_occupation_industry_variable_selector,
+    industry_within_occupation_occupation_selector,
+    industry_within_occupation_occupation_variable_selector,
+    industry_within_occupation_top_n_selector,
+    make_share_chart,
+    mo,
+    title_columns,
+):
+    _industry_column = industry_within_occupation_industry_variable_selector.value
+    _occupation_column = industry_within_occupation_occupation_variable_selector.value
+    _selected_occupations = tuple(industry_within_occupation_occupation_selector.value or ())
+    _top_n = max(1, int(industry_within_occupation_top_n_selector.value))
+    _country_scope, _scope_label = filter_country_scope(
+        fnh,
+        industry_within_occupation_country_selector.value,
+    )
+    _selected_scope = _country_scope.loc[
+        _country_scope[_occupation_column].isin(_selected_occupations)
+    ].copy()
+    _summary = distribution_table(
+        _selected_scope,
+        _industry_column,
+        title_columns.get(_industry_column),
+    )
+    _figure = (
+        make_share_chart(
+            _summary,
+            f"Top {_top_n} industries within the selected occupation set — {_scope_label}",
+            _top_n,
+            x_title="Share within selected occupation set",
+        )
+        if _selected_occupations
+        else mo.callout(mo.md("Select at least one occupation."), kind="warn")
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### 4.3. Conditional industry distribution within an occupation
+
+                - The selected occupations are pooled before calculating the industry shares.
+                - Each bar reports an industry's share of universe-sample hires in the selected country and occupation set.
+                """
+            ),
+            mo.hstack(
+                [
+                    industry_within_occupation_country_selector,
+                    industry_within_occupation_top_n_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            mo.hstack(
+                [
+                    industry_within_occupation_industry_variable_selector,
+                    industry_within_occupation_occupation_variable_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            industry_within_occupation_occupation_selector,
+            _figure,
+            mo.accordion(
+                {
+                    "View industries within selected occupations": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
+
+
+@app.cell
 def _(country_iso3, distribution_table, fnh, math, us_state_code):
     country_summary = distribution_table(fnh, "country")
     country_summary["iso3"] = country_summary["country"].map(country_iso3)
@@ -1145,25 +1899,18 @@ def _(country_iso3, distribution_table, fnh, math, us_state_code):
         lambda count: math.log10(count) if count > 0 else 0
     )
     mapped_country_summary = country_summary.dropna(subset=["iso3"]).copy()
-    unmapped_country_summary = country_summary.loc[
-        country_summary["iso3"].isna()
-    ].copy()
+    unmapped_country_summary = country_summary.loc[country_summary["iso3"].isna()].copy()
     state_working = fnh.loc[fnh["country"] == "United States", ["state"]].copy()
     state_working["state"] = state_working["state"].fillna("<Missing>")
     us_state_summary = (
-        state_working.groupby("state", observed=True)
-        .size()
-        .rename("count")
-        .reset_index()
+        state_working.groupby("state", observed=True).size().rename("count").reset_index()
     )
     us_state_summary["share_within_country"] = (
         us_state_summary["count"] / us_state_summary["count"].sum()
     )
     us_state_summary["state_code"] = us_state_summary["state"].map(us_state_code)
     state_map_data = us_state_summary.dropna(subset=["state_code"]).copy()
-    unmatched_state_data = us_state_summary.loc[
-        us_state_summary["state_code"].isna()
-    ].copy()
+    unmatched_state_data = us_state_summary.loc[us_state_summary["state_code"].isna()].copy()
     state_map_coverage = (
         state_map_data["count"].sum() / us_state_summary["count"].sum()
         if not us_state_summary.empty
@@ -1202,7 +1949,15 @@ def _(mapped_country_summary, mo, px, unmapped_country_summary):
     ).update_geos(showframe=False, showcoastlines=True)
     mo.vstack(
         [
-            mo.md("## 4. Other results\n\n### 4.1. Geography distribution"),
+            mo.md(
+                """
+                ## 5. Other results
+
+                ### 5.1. Geography distribution
+
+                - The country map reports absolute candidate-hire concentration and global shares.
+                """
+            ),
             _figure,
             mo.accordion(
                 {
@@ -1217,7 +1972,7 @@ def _(mapped_country_summary, mo, px, unmapped_country_summary):
                         pagination=True,
                         page_size=20,
                         show_column_summaries=False,
-                    )
+                    ),
                 }
             ),
         ],
@@ -1255,13 +2010,12 @@ def _(mo, px, state_map_coverage, state_map_data, unmatched_state_data):
     mo.vstack(
         [
             mo.md(
-                "State shares use all U.S. candidate focal new hires as the denominator, "
-                "including missing or unmapped state labels."
+                R"""
+                - State shares use all U.S. candidate focal new hires as the denominator.
+                """
             ),
             _figure,
-            mo.md(
-                f"The state-code mapping covers **{state_map_coverage:.2%}** of U.S. hires."
-            ),
+            mo.md(f"The state-code mapping covers **{state_map_coverage:.2%}** of U.S. hires."),
             mo.accordion(
                 {
                     "View mapped U.S. state data": mo.ui.table(
@@ -1275,7 +2029,7 @@ def _(mo, px, state_map_coverage, state_map_data, unmatched_state_data):
                         pagination=True,
                         page_size=20,
                         show_column_summaries=False,
-                    )
+                    ),
                 }
             ),
         ],
@@ -1285,8 +2039,28 @@ def _(mo, px, state_map_coverage, state_map_data, unmatched_state_data):
 
 
 @app.cell
-def _(alt, distribution_table, fnh, mo, pd):
-    seniority_summary = distribution_table(fnh, "seniority")
+def _(country_selector_options, mo):
+    seniority_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    return (seniority_country_selector,)
+
+
+@app.cell
+def _(
+    alt,
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    mo,
+    pd,
+    seniority_country_selector,
+):
+    _scope, _scope_label = filter_country_scope(fnh, seniority_country_selector.value)
+    seniority_summary = distribution_table(_scope, "seniority")
     seniority_summary["seniority_order"] = pd.to_numeric(
         seniority_summary["value"], errors="coerce"
     )
@@ -1315,12 +2089,27 @@ def _(alt, distribution_table, fnh, mo, pd):
                 alt.Tooltip("share:Q", title="Share", format=".2%"),
             ],
         )
-        .properties(width="container", height=360)
+        .properties(
+            width="container",
+            height=360,
+            title=alt.TitleParams(
+                text=f"Seniority distribution — {_scope_label}",
+                anchor="start",
+            ),
+        )
         .configure_view(stroke=None)
     )
     mo.vstack(
         [
-            mo.md("### 4.2. Seniority distribution"),
+            mo.md(
+                """
+                ### 5.2. Seniority distribution
+
+                - Shares use candidate focal new hires in the selected country scope as the
+                  denominator.
+                """
+            ),
+            seniority_country_selector,
             _figure,
             mo.accordion(
                 {
@@ -1339,9 +2128,21 @@ def _(alt, distribution_table, fnh, mo, pd):
 
 
 @app.cell
-def _(alt, fnh, mo, pd):
+def _(country_selector_options, mo):
+    time_series_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    return (time_series_country_selector,)
+
+
+@app.cell
+def _(alt, filter_country_scope, fnh, mo, pd, time_series_country_selector):
+    _scope, _scope_label = filter_country_scope(fnh, time_series_country_selector.value)
     time_series = (
-        fnh.dropna(subset=["start_month"])
+        _scope.dropna(subset=["start_month"])
         .assign(
             start_month=lambda data: (
                 pd.to_datetime(data["start_month"]).dt.to_period("M").dt.to_timestamp()
@@ -1363,13 +2164,26 @@ def _(alt, fnh, mo, pd):
                 alt.Tooltip("count:Q", title="Candidate focal new hires", format=","),
             ],
         )
-        .properties(width="container", height=360)
+        .properties(
+            width="container",
+            height=360,
+            title=alt.TitleParams(
+                text=f"Candidate focal new hires over time — {_scope_label}",
+                anchor="start",
+            ),
+        )
         .configure_view(stroke=None)
     )
     mo.vstack(
         [
-            mo.md("### 4.3. Time-series"),
-            mo.md("Monthly count by employment start month."),
+            mo.md(
+                """
+                ### 5.3. Time-series
+
+                - Monthly counts are shown for the selected country scope.
+                """
+            ),
+            time_series_country_selector,
             _figure,
             mo.accordion(
                 {
