@@ -30,14 +30,11 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # Inventor-matched candidate focal new hires: summary statistics
+    # Inventor-matched candidate focal new hires: Summary statistics
 
-    This notebook describes the candidate focal new hires whose users have at least one
-    inventor ID in the Revelio-to-PatentsView crosswalk. The observation unit remains a
-    **user-company observation**. Multiple inventor IDs for one user do not duplicate that
-    observation. All matched-sample distributions are simple averages over matched
-    user-company observations; red diamonds and the additional comparison series show the
-    corresponding universe baseline.
+    - In this report, I will offer summary statistics for the matched sample of candidate new hires.
+    - When possible, I will always constrast them with the corresponding statistics for the universe sample of candidate new hires.
+    - **One key message from such a comparison is that the inventor-matched sample is different from the universe sample of candidate new hires.**
     """)
     return
 
@@ -45,6 +42,7 @@ def _(mo):
 @app.cell
 def _(alt, math, pd, pycountry, re):
     MISSING_LABEL = "<Missing>"
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES = 1_000
     US_LABEL = "United States"
     ALL_COUNTRIES_SCOPE = "__all__"
     US_SCOPE = "__us__"
@@ -101,9 +99,16 @@ def _(alt, math, pd, pycountry, re):
         working["occupation_label"] = working[occupation_column]
         if occupation_title:
             working["occupation_label"] += " — " + working[occupation_title]
+        working["industry_value"] = working[industry_column]
+        working["occupation_value"] = working[occupation_column]
         summary = (
             working.groupby(
-                ["industry_label", "occupation_label"],
+                [
+                    "industry_value",
+                    "industry_label",
+                    "occupation_value",
+                    "occupation_label",
+                ],
                 dropna=False,
                 observed=True,
             )
@@ -157,7 +162,34 @@ def _(alt, math, pd, pycountry, re):
             labels.extend(explicit_countries)
         return data.loc[mask].copy(), ", ".join(labels)
 
-    def make_share_chart(summary, title, top_n=None, baseline=None):
+    def category_selector_options(data, value_column, title_column=None):
+        summary = distribution_table(data, value_column, title_column)
+        summary = summary.loc[summary["value"].ne(MISSING_LABEL)]
+        return dict(
+            zip(
+                summary["display_label"].astype(str),
+                summary["value"].astype(str),
+                strict=True,
+            )
+        )
+
+    def restrict_to_eligible_industries(
+        summary,
+        eligible_values,
+        value_column="value",
+    ):
+        result = summary.loc[summary[value_column].astype("string").isin(eligible_values)].copy()
+        result = result.reset_index(drop=True)
+        result["rank"] = range(1, len(result) + 1)
+        return result
+
+    def make_share_chart(
+        summary,
+        title,
+        top_n=None,
+        baseline=None,
+        share_axis_title="Share within selected country scope",
+    ):
         top = summary.head(top_n).copy() if top_n else summary.copy()
         top = top.drop(
             columns=["baseline_count", "baseline_share"],
@@ -214,7 +246,7 @@ def _(alt, math, pd, pycountry, re):
             .encode(
                 x=alt.X(
                     "share:Q",
-                    title="Share within selected country scope",
+                    title=share_axis_title,
                     axis=alt.Axis(format=".1%"),
                     scale=alt.Scale(domain=domain),
                 ),
@@ -346,13 +378,16 @@ def _(alt, math, pd, pycountry, re):
 
     return (
         MISSING_LABEL,
+        MIN_ALL_COUNTRY_INDUSTRY_HIRES,
         available_country_options,
+        category_selector_options,
         country_iso3,
         distribution_table,
         filter_country_scope,
         hierarchy_number,
         joint_distribution_table,
         make_share_chart,
+        restrict_to_eligible_industries,
         us_state_code,
     )
 
@@ -440,9 +475,7 @@ def _(ds, hierarchy_number, mo, pd):
         dtype_backend="pyarrow",
     )
     if date_column == "start_month":
-        universe_fnh["start_month"] = pd.to_datetime(
-            universe_fnh[date_column], errors="coerce"
-        )
+        universe_fnh["start_month"] = pd.to_datetime(universe_fnh[date_column], errors="coerce")
     else:
         universe_fnh["start_month"] = (
             pd.to_datetime(universe_fnh[date_column], errors="coerce")
@@ -495,6 +528,7 @@ def _(ds, hierarchy_number, mo, pd):
 def _(
     EXPECTED_RICS_COLUMNS,
     EXPECTED_ROLE_COLUMNS,
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES,
     MISSING_LABEL,
     available_country_options,
     available_rics_columns,
@@ -505,8 +539,21 @@ def _(
     pd,
     universe_fnh,
 ):
+    DEFAULT_BIOPHARM_INDUSTRIES = (
+        "Biotechnology and Life Sciences",
+        "Pharmaceutical Manufacturing",
+        "Pharmaceuticals",
+    )
+    DEFAULT_FOCAL_OCCUPATION_TITLES = (
+        "Microbiologists",
+        "Chemical Engineers",
+        "Bioengineers and Biomedical Engineers",
+        "Biochemists and Biophysicists",
+        "Chemists",
+        "Animal Scientists",
+    )
     CLASSIFICATION_LABELS = {
-        "onet_code": "O*NET code and title",
+        "onet_code": "ONET code and title",
         "naics_code": "NAICS code and description",
         **{
             column: f"Revelio role K{hierarchy_number(column):,}"
@@ -527,6 +574,21 @@ def _(
     distribution_tables = {
         column: distribution_table(fnh, column, title_columns.get(column))
         for column in classification_columns
+    }
+    _industry_columns = ("naics_code", *available_rics_columns)
+
+    def _eligible_industry_values(column):
+        _counts = (
+            universe_fnh[column].fillna(MISSING_LABEL).astype("string").value_counts(dropna=False)
+        )
+        return frozenset(
+            str(value)
+            for value, count in _counts.items()
+            if value != MISSING_LABEL and count >= MIN_ALL_COUNTRY_INDUSTRY_HIRES
+        )
+
+    eligible_industries_by_column = {
+        column: _eligible_industry_values(column) for column in _industry_columns
     }
     classification_stats = pd.DataFrame(
         [
@@ -625,10 +687,13 @@ def _(
     )
     return (
         CLASSIFICATION_LABELS,
+        DEFAULT_BIOPHARM_INDUSTRIES,
+        DEFAULT_FOCAL_OCCUPATION_TITLES,
         basic_numbers,
         classification_stats,
         country_selector_options,
         default_industry_column,
+        eligible_industries_by_column,
         industry_selector_options,
         naics_title_diagnostic,
         occupation_selector_options,
@@ -670,18 +735,19 @@ def _(
             mo.md("## 1. Basic numbers"),
             mo.md(
                 """
-                The universe sample is constructed by: (i) retaining employment spells in
-                two-digit occupation groups 17 (Architecture and Engineering) and 19 (Life,
-                Physical, and Social Science); (ii) retaining starts from January 2021 through
-                December 2023; (iii) excluding missing geography or job-title information;
-                (iv) excluding internships; and (v) retaining one spell per user-company cell.
+                
+                Recall the construction of the universe sample of candidate new hires:
+                - Retaining employment spells in two-digit occupation groups 17 (Architecture and Engineering) and 19 (Life, Physical, and Social Science).
+                - Retaining starts from January 2021 through December 2023.
+                - Excluding missing geography or job-title information.
+                - Excluding internships.
+                - Retaining one spell per user-company cell.
 
-                This matched notebook adds one restriction: retain a user-company observation
-                when the user has at least one inventor ID in the Revelio-to-PatentsView
-                crosswalk. Duplicate crosswalk rows or multiple inventor IDs do not duplicate
-                the user-company observation. This remains a user-company sample, so one user
-                may appear at multiple companies. All summary statistics are simple averages
-                over matched user-company observations.
+                
+                This matched notebook adds one restriction: 
+                - Matched sample consists of those new hires who has at least one inventor ID in the  inventor database. 
+                - Multiple inventor IDs will not duplicate the user-company observation. So the matched sample is still at user-company level. 
+                - All summary statistics are simple averages over matched user-company observations.
                 """
             ),
             mo.md(
@@ -706,7 +772,7 @@ def _(
                         show_column_summaries=False,
                     ),
                     "Label diagnostics": mo.md(
-                        f"O*NET codes with multiple titles: **{onet_conflicts:,}**; "
+                        f"ONET codes with multiple titles: **{onet_conflicts:,}**; "
                         f"NAICS codes with multiple descriptions: **{naics_conflicts:,}**."
                     ),
                 }
@@ -718,223 +784,91 @@ def _(
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""
-    ## 2. The occupation distribution
-
-    Bars report the inventor-matched sample. Red diamonds report the universe baseline
-    share for the same category.
-    """)
-    return
-
-
-@app.cell
-def _(country_selector_options, mo):
-    onet_country_selector = mo.ui.multiselect(
+def _(CLASSIFICATION_LABELS, country_selector_options, mo, occupation_selector_options):
+    occupation_country_selector = mo.ui.multiselect(
         options=country_selector_options,
         value=["All countries"],
         label="Countries",
         full_width=True,
     )
-    return (onet_country_selector,)
-
-
-@app.cell
-def _(
-    distribution_table,
-    filter_country_scope,
-    fnh,
-    make_share_chart,
-    mo,
-    onet_country_selector,
-    universe_fnh,
-):
-    _matched_scope, _scope_label = filter_country_scope(
-        fnh,
-        onet_country_selector.value,
-    )
-    _universe_scope, _ = filter_country_scope(
-        universe_fnh,
-        onet_country_selector.value,
-    )
-    _summary = distribution_table(_matched_scope, "onet_code", "onet_title")
-    _baseline = distribution_table(_universe_scope, "onet_code", "onet_title")
-    _chart = make_share_chart(
-        _summary,
-        f"O*NET occupation distribution — {_scope_label}",
-        baseline=_baseline,
-    )
-    mo.vstack(
-        [
-            mo.md("### 2.1. O*NET occupation distribution"),
-            onet_country_selector,
-            _chart,
-            mo.accordion(
-                {
-                    "View matched O*NET counts": mo.ui.table(
-                        _summary,
-                        pagination=True,
-                        page_size=20,
-                        show_column_summaries=False,
-                    )
-                }
-            ),
-        ],
-        gap=1,
-    )
-    return
-
-
-@app.cell
-def _(available_role_columns, country_selector_options, mo):
-    role_country_selector = mo.ui.multiselect(
-        options=country_selector_options,
-        value=["All countries"],
-        label="Countries",
+    occupation_variable_selector = mo.ui.dropdown(
+        options=occupation_selector_options,
+        value=CLASSIFICATION_LABELS["onet_code"],
+        label="Occupation variable",
         full_width=True,
     )
-    role_variable_selector = mo.ui.dropdown(
-        options=list(available_role_columns),
-        value="role_k1500" if "role_k1500" in available_role_columns else None,
-        label="Revelio occupation variable",
-        full_width=True,
-    )
-    role_top_n_selector = mo.ui.number(
+    occupation_top_n_selector = mo.ui.number(
         start=1,
-        stop=1000,
+        stop=2000,
         step=1,
         value=50,
         label="Number of top occupations",
     )
-    return role_country_selector, role_top_n_selector, role_variable_selector
+    return (
+        occupation_country_selector,
+        occupation_top_n_selector,
+        occupation_variable_selector,
+    )
 
 
 @app.cell
 def _(
+    CLASSIFICATION_LABELS,
     distribution_table,
     filter_country_scope,
     fnh,
     make_share_chart,
     mo,
-    role_country_selector,
-    role_top_n_selector,
-    role_variable_selector,
+    occupation_country_selector,
+    occupation_top_n_selector,
+    occupation_variable_selector,
+    title_columns,
     universe_fnh,
 ):
-    _variable = role_variable_selector.value
-    _top_n = max(1, int(role_top_n_selector.value))
+    _variable = occupation_variable_selector.value
+    _classification_label = CLASSIFICATION_LABELS[_variable]
+    _top_n = max(1, int(occupation_top_n_selector.value))
     _matched_scope, _scope_label = filter_country_scope(
         fnh,
-        role_country_selector.value,
+        occupation_country_selector.value,
     )
     _universe_scope, _ = filter_country_scope(
         universe_fnh,
-        role_country_selector.value,
-    )
-    _summary = distribution_table(_matched_scope, _variable)
-    _baseline = distribution_table(_universe_scope, _variable)
-    _chart = make_share_chart(
-        _summary,
-        f"Top {_top_n} occupations in {_variable} — {_scope_label}",
-        _top_n,
-        baseline=_baseline,
-    )
-    mo.vstack(
-        [
-            mo.md("### 2.2. Revelio's own occupation distribution"),
-            mo.hstack(
-                [role_country_selector, role_variable_selector, role_top_n_selector],
-                justify="start",
-                gap=2,
-                widths="equal",
-            ),
-            _chart,
-            mo.accordion(
-                {
-                    "View matched categories": mo.ui.table(
-                        _summary,
-                        pagination=True,
-                        page_size=20,
-                        show_column_summaries=False,
-                    )
-                }
-            ),
-        ],
-        gap=1,
-    )
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    ## 3. The industry distribution
-
-    Bars report the inventor-matched sample. Red diamonds report the universe baseline
-    share for the same category.
-    """)
-    return
-
-
-@app.cell
-def _(country_selector_options, mo):
-    naics_country_selector = mo.ui.multiselect(
-        options=country_selector_options,
-        value=["All countries"],
-        label="Countries",
-        full_width=True,
-    )
-    naics_top_n_selector = mo.ui.number(
-        start=1,
-        stop=2000,
-        step=1,
-        value=50,
-        label="Number of top NAICS industries",
-    )
-    return naics_country_selector, naics_top_n_selector
-
-
-@app.cell
-def _(
-    distribution_table,
-    filter_country_scope,
-    fnh,
-    make_share_chart,
-    mo,
-    naics_country_selector,
-    naics_top_n_selector,
-    universe_fnh,
-):
-    _top_n = max(1, int(naics_top_n_selector.value))
-    _matched_scope, _scope_label = filter_country_scope(
-        fnh,
-        naics_country_selector.value,
-    )
-    _universe_scope, _ = filter_country_scope(
-        universe_fnh,
-        naics_country_selector.value,
+        occupation_country_selector.value,
     )
     _summary = distribution_table(
         _matched_scope,
-        "naics_code",
-        "naics_description",
+        _variable,
+        title_columns.get(_variable),
     )
     _baseline = distribution_table(
         _universe_scope,
-        "naics_code",
-        "naics_description",
+        _variable,
+        title_columns.get(_variable),
     )
     _chart = make_share_chart(
         _summary,
-        f"Top {_top_n} NAICS industries — {_scope_label}",
+        f"Top {_top_n} occupations by {_classification_label} — {_scope_label}",
         _top_n,
         baseline=_baseline,
     )
     mo.vstack(
         [
-            mo.md("### 3.1. NAICS distribution"),
+            mo.md(
+                """
+                ## 2. The occupation distribution
+
+                Choose either ONET or a Revelio occupation hierarchy. Bars report the
+                inventor-matched sample; red diamonds report the universe baseline for the
+                same categories.
+                """
+            ),
             mo.hstack(
-                [naics_country_selector, naics_top_n_selector],
+                [
+                    occupation_country_selector,
+                    occupation_variable_selector,
+                    occupation_top_n_selector,
+                ],
                 justify="start",
                 gap=2,
                 widths="equal",
@@ -942,7 +876,7 @@ def _(
             _chart,
             mo.accordion(
                 {
-                    "View matched NAICS categories": mo.ui.table(
+                    "View matched occupation categories": mo.ui.table(
                         _summary,
                         pagination=True,
                         page_size=20,
@@ -957,64 +891,98 @@ def _(
 
 
 @app.cell
-def _(available_rics_columns, country_selector_options, mo):
-    rics_country_selector = mo.ui.multiselect(
+def _(
+    CLASSIFICATION_LABELS,
+    country_selector_options,
+    default_industry_column,
+    industry_selector_options,
+    mo,
+):
+    industry_country_selector = mo.ui.multiselect(
         options=country_selector_options,
         value=["All countries"],
         label="Countries",
         full_width=True,
     )
-    rics_variable_selector = mo.ui.dropdown(
-        options=list(available_rics_columns),
-        value="rics_k400" if "rics_k400" in available_rics_columns else None,
-        label="Revelio industry variable",
+    industry_variable_selector = mo.ui.dropdown(
+        options=industry_selector_options,
+        value=CLASSIFICATION_LABELS[default_industry_column],
+        label="Industry variable",
         full_width=True,
     )
-    rics_top_n_selector = mo.ui.number(
+    industry_top_n_selector = mo.ui.number(
         start=1,
         stop=2000,
         step=1,
         value=50,
-        label="Number of top Revelio industries",
+        label="Number of top eligible industries",
     )
-    return rics_country_selector, rics_top_n_selector, rics_variable_selector
+    return industry_country_selector, industry_top_n_selector, industry_variable_selector
 
 
 @app.cell
 def _(
+    CLASSIFICATION_LABELS,
     distribution_table,
+    eligible_industries_by_column,
     filter_country_scope,
     fnh,
+    industry_country_selector,
+    industry_top_n_selector,
+    industry_variable_selector,
     make_share_chart,
     mo,
-    rics_country_selector,
-    rics_top_n_selector,
-    rics_variable_selector,
+    restrict_to_eligible_industries,
+    title_columns,
     universe_fnh,
 ):
-    _variable = rics_variable_selector.value
-    _top_n = max(1, int(rics_top_n_selector.value))
+    _variable = industry_variable_selector.value
+    _classification_label = CLASSIFICATION_LABELS[_variable]
+    _top_n = max(1, int(industry_top_n_selector.value))
     _matched_scope, _scope_label = filter_country_scope(
         fnh,
-        rics_country_selector.value,
+        industry_country_selector.value,
     )
     _universe_scope, _ = filter_country_scope(
         universe_fnh,
-        rics_country_selector.value,
+        industry_country_selector.value,
     )
-    _summary = distribution_table(_matched_scope, _variable)
-    _baseline = distribution_table(_universe_scope, _variable)
+    _summary = distribution_table(
+        _matched_scope,
+        _variable,
+        title_columns.get(_variable),
+    )
+    _baseline = distribution_table(
+        _universe_scope,
+        _variable,
+        title_columns.get(_variable),
+    )
+    _eligible_values = eligible_industries_by_column[_variable]
+    _summary = restrict_to_eligible_industries(_summary, _eligible_values)
+    _baseline = restrict_to_eligible_industries(_baseline, _eligible_values)
     _chart = make_share_chart(
         _summary,
-        f"Top {_top_n} industries in {_variable} — {_scope_label}",
+        f"Top {_top_n} industries by {_classification_label} — {_scope_label}",
         _top_n,
         baseline=_baseline,
     )
     mo.vstack(
         [
-            mo.md("### 3.2. Revelio's own industry distribution"),
+            mo.md(
+                """
+                ## 3. The industry distribution
+
+                Choose either NAICS or a Revelio industry hierarchy. Only industries with at
+                least 1,000 candidate focal new hires across all countries are shown. Bars
+                report the inventor-matched sample; red diamonds report the universe baseline.
+                """
+            ),
             mo.hstack(
-                [rics_country_selector, rics_variable_selector, rics_top_n_selector],
+                [
+                    industry_country_selector,
+                    industry_variable_selector,
+                    industry_top_n_selector,
+                ],
                 justify="start",
                 gap=2,
                 widths="equal",
@@ -1022,7 +990,7 @@ def _(
             _chart,
             mo.accordion(
                 {
-                    "View matched Revelio industry categories": mo.ui.table(
+                    "View eligible matched industry categories": mo.ui.table(
                         _summary,
                         pagination=True,
                         page_size=20,
@@ -1068,7 +1036,7 @@ def _(
         stop=2000,
         step=1,
         value=50,
-        label="Number of top industry–occupation combinations",
+        label="Number of top eligible industry-occupation combinations",
     )
     return (
         industry_occupation_country_selector,
@@ -1080,6 +1048,7 @@ def _(
 
 @app.cell
 def _(
+    eligible_industries_by_column,
     filter_country_scope,
     fnh,
     industry_occupation_country_selector,
@@ -1089,6 +1058,7 @@ def _(
     joint_distribution_table,
     make_share_chart,
     mo,
+    restrict_to_eligible_industries,
     title_columns,
     universe_fnh,
 ):
@@ -1115,18 +1085,36 @@ def _(
         _occupation_column,
         title_columns,
     )
+    _eligible_values = eligible_industries_by_column[_industry_column]
+    _summary = restrict_to_eligible_industries(
+        _summary,
+        _eligible_values,
+        value_column="industry_value",
+    )
+    _baseline = restrict_to_eligible_industries(
+        _baseline,
+        _eligible_values,
+        value_column="industry_value",
+    )
     _chart = make_share_chart(
         _summary,
-        f"Top {_top_n} industry–occupation combinations — {_scope_label}",
+        f"Top {_top_n} industry-occupation combinations — {_scope_label}",
         _top_n,
         baseline=_baseline,
     )
     mo.vstack(
         [
-            mo.md("## 4. Industry–occupation distribution"),
             mo.md(
-                "Bars show shares in the inventor-matched sample; red diamonds show "
-                "shares in the universe sample for the same combinations."
+                """
+                ## 4. Industry-occupation distribution
+
+                - In this section, I document the joint and marginal distribution of industry-occupation combinations among the universe sample of candidate focal new hires.
+                """
+            ),
+            mo.md(
+                """
+                ### 4.1. Joint industry-occupation distribution
+                """
             ),
             mo.hstack(
                 [
@@ -1149,7 +1137,357 @@ def _(
             _chart,
             mo.accordion(
                 {
-                    "View matched industry–occupation combinations": mo.ui.table(
+                    "View eligible matched industry-occupation combinations": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
+
+
+@app.cell
+def _(
+    CLASSIFICATION_LABELS,
+    country_selector_options,
+    default_industry_column,
+    industry_selector_options,
+    mo,
+    occupation_selector_options,
+):
+    occupation_within_industry_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    occupation_within_industry_industry_variable_selector = mo.ui.dropdown(
+        options=industry_selector_options,
+        value=CLASSIFICATION_LABELS[default_industry_column],
+        label="Industry variable",
+        full_width=True,
+    )
+    occupation_within_industry_occupation_variable_selector = mo.ui.dropdown(
+        options=occupation_selector_options,
+        value=CLASSIFICATION_LABELS["onet_code"],
+        label="Occupation variable",
+        full_width=True,
+    )
+    occupation_within_industry_top_n_selector = mo.ui.number(
+        start=1,
+        stop=2000,
+        step=1,
+        value=25,
+        label="Number of occupations",
+    )
+    return (
+        occupation_within_industry_country_selector,
+        occupation_within_industry_industry_variable_selector,
+        occupation_within_industry_occupation_variable_selector,
+        occupation_within_industry_top_n_selector,
+    )
+
+
+@app.cell
+def _(
+    DEFAULT_BIOPHARM_INDUSTRIES,
+    category_selector_options,
+    eligible_industries_by_column,
+    mo,
+    occupation_within_industry_industry_variable_selector,
+    title_columns,
+    universe_fnh,
+):
+    _industry_column = occupation_within_industry_industry_variable_selector.value
+    _options = category_selector_options(
+        universe_fnh,
+        _industry_column,
+        title_columns.get(_industry_column),
+    )
+    _eligible_values = eligible_industries_by_column[_industry_column]
+    _options = {label: value for label, value in _options.items() if value in _eligible_values}
+    _default_labels = [
+        _label
+        for _industry in DEFAULT_BIOPHARM_INDUSTRIES
+        for _label, _value in _options.items()
+        if _value == _industry
+    ]
+    if not _default_labels and _options:
+        _default_labels = [next(iter(_options))]
+    occupation_within_industry_industries_selector = mo.ui.multiselect(
+        options=_options,
+        value=_default_labels,
+        label="Industries",
+        full_width=True,
+    )
+    return (occupation_within_industry_industries_selector,)
+
+
+@app.cell
+def _(
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    make_share_chart,
+    mo,
+    occupation_within_industry_country_selector,
+    occupation_within_industry_industries_selector,
+    occupation_within_industry_industry_variable_selector,
+    occupation_within_industry_occupation_variable_selector,
+    occupation_within_industry_top_n_selector,
+    title_columns,
+    universe_fnh,
+):
+    _industry_column = occupation_within_industry_industry_variable_selector.value
+    _occupation_column = occupation_within_industry_occupation_variable_selector.value
+    _industry_values = tuple(occupation_within_industry_industries_selector.value or ())
+    _top_n = max(1, int(occupation_within_industry_top_n_selector.value))
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        occupation_within_industry_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        occupation_within_industry_country_selector.value,
+    )
+    if _industry_values:
+        _matched_conditioned = _matched_scope.loc[
+            _matched_scope[_industry_column].astype("string").isin(_industry_values)
+        ]
+        _universe_conditioned = _universe_scope.loc[
+            _universe_scope[_industry_column].astype("string").isin(_industry_values)
+        ]
+    else:
+        _matched_conditioned = _matched_scope.iloc[0:0]
+        _universe_conditioned = _universe_scope.iloc[0:0]
+    _summary = distribution_table(
+        _matched_conditioned,
+        _occupation_column,
+        title_columns.get(_occupation_column),
+    )
+    _baseline = distribution_table(
+        _universe_conditioned,
+        _occupation_column,
+        title_columns.get(_occupation_column),
+    )
+    _chart = make_share_chart(
+        _summary,
+        f"Top {_top_n} occupations within selected industries — {_scope_label}",
+        _top_n,
+        baseline=_baseline,
+        share_axis_title="Share within selected industry set",
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### 4.2. Occupation distribution within an industry
+                """
+            ),
+            mo.hstack(
+                [
+                    occupation_within_industry_country_selector,
+                    occupation_within_industry_top_n_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            mo.hstack(
+                [
+                    occupation_within_industry_industry_variable_selector,
+                    occupation_within_industry_occupation_variable_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            occupation_within_industry_industries_selector,
+            _chart,
+            mo.accordion(
+                {
+                    "View matched conditional occupation categories": mo.ui.table(
+                        _summary,
+                        pagination=True,
+                        page_size=20,
+                        show_column_summaries=False,
+                    )
+                }
+            ),
+        ],
+        gap=1,
+    )
+    return
+
+
+@app.cell
+def _(
+    CLASSIFICATION_LABELS,
+    country_selector_options,
+    default_industry_column,
+    industry_selector_options,
+    mo,
+    occupation_selector_options,
+):
+    industry_within_occupation_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    industry_within_occupation_industry_variable_selector = mo.ui.dropdown(
+        options=industry_selector_options,
+        value=CLASSIFICATION_LABELS[default_industry_column],
+        label="Industry variable",
+        full_width=True,
+    )
+    industry_within_occupation_occupation_variable_selector = mo.ui.dropdown(
+        options=occupation_selector_options,
+        value=CLASSIFICATION_LABELS["onet_code"],
+        label="Occupation variable",
+        full_width=True,
+    )
+    industry_within_occupation_top_n_selector = mo.ui.number(
+        start=1,
+        stop=2000,
+        step=1,
+        value=25,
+        label="Number of eligible industries",
+    )
+    return (
+        industry_within_occupation_country_selector,
+        industry_within_occupation_industry_variable_selector,
+        industry_within_occupation_occupation_variable_selector,
+        industry_within_occupation_top_n_selector,
+    )
+
+
+@app.cell
+def _(
+    DEFAULT_FOCAL_OCCUPATION_TITLES,
+    category_selector_options,
+    industry_within_occupation_occupation_variable_selector,
+    mo,
+    title_columns,
+    universe_fnh,
+):
+    _occupation_column = industry_within_occupation_occupation_variable_selector.value
+    _options = category_selector_options(
+        universe_fnh,
+        _occupation_column,
+        title_columns.get(_occupation_column),
+    )
+    _default_labels = [
+        _label
+        for _title in DEFAULT_FOCAL_OCCUPATION_TITLES
+        for _label in _options
+        if _label.endswith(f" — {_title}")
+    ]
+    if not _default_labels and _options:
+        _default_labels = [next(iter(_options))]
+    industry_within_occupation_occupations_selector = mo.ui.multiselect(
+        options=_options,
+        value=_default_labels,
+        label="Occupations",
+        full_width=True,
+    )
+    return (industry_within_occupation_occupations_selector,)
+
+
+@app.cell
+def _(
+    distribution_table,
+    eligible_industries_by_column,
+    filter_country_scope,
+    fnh,
+    industry_within_occupation_country_selector,
+    industry_within_occupation_industry_variable_selector,
+    industry_within_occupation_occupation_variable_selector,
+    industry_within_occupation_occupations_selector,
+    industry_within_occupation_top_n_selector,
+    make_share_chart,
+    mo,
+    restrict_to_eligible_industries,
+    title_columns,
+    universe_fnh,
+):
+    _industry_column = industry_within_occupation_industry_variable_selector.value
+    _occupation_column = industry_within_occupation_occupation_variable_selector.value
+    _occupation_values = tuple(industry_within_occupation_occupations_selector.value or ())
+    _top_n = max(1, int(industry_within_occupation_top_n_selector.value))
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        industry_within_occupation_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        industry_within_occupation_country_selector.value,
+    )
+    if _occupation_values:
+        _matched_conditioned = _matched_scope.loc[
+            _matched_scope[_occupation_column].astype("string").isin(_occupation_values)
+        ]
+        _universe_conditioned = _universe_scope.loc[
+            _universe_scope[_occupation_column].astype("string").isin(_occupation_values)
+        ]
+    else:
+        _matched_conditioned = _matched_scope.iloc[0:0]
+        _universe_conditioned = _universe_scope.iloc[0:0]
+    _summary = distribution_table(
+        _matched_conditioned,
+        _industry_column,
+        title_columns.get(_industry_column),
+    )
+    _baseline = distribution_table(
+        _universe_conditioned,
+        _industry_column,
+        title_columns.get(_industry_column),
+    )
+    _eligible_values = eligible_industries_by_column[_industry_column]
+    _summary = restrict_to_eligible_industries(_summary, _eligible_values)
+    _baseline = restrict_to_eligible_industries(_baseline, _eligible_values)
+    _chart = make_share_chart(
+        _summary,
+        f"Top {_top_n} industries within selected occupations — {_scope_label}",
+        _top_n,
+        baseline=_baseline,
+        share_axis_title="Share within selected occupation set",
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### 4.3. Industry distribution within an occupation
+                """
+            ),
+            mo.hstack(
+                [
+                    industry_within_occupation_country_selector,
+                    industry_within_occupation_top_n_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            mo.hstack(
+                [
+                    industry_within_occupation_industry_variable_selector,
+                    industry_within_occupation_occupation_variable_selector,
+                ],
+                justify="start",
+                gap=2,
+                widths="equal",
+            ),
+            industry_within_occupation_occupations_selector,
+            _chart,
+            mo.accordion(
+                {
+                    "View eligible matched conditional industry categories": mo.ui.table(
                         _summary,
                         pagination=True,
                         page_size=20,
@@ -1296,9 +1634,11 @@ def _(
     mo.vstack(
         [
             mo.md("## 5. Other results\n\n### 5.1. Geography distribution"),
-            mo.md("Hover over a country to compare matched and universe shares."),
-            _map,
+            mo.md(
+                "In the inventor-matched sample, US dominates with a share of around 60%; followed by Germany, France, UK, India."
+            ),
             _country_bars,
+            _map,
             mo.accordion(
                 {
                     "View country statistics": mo.ui.table(
@@ -1351,15 +1691,7 @@ def _(mo, px, state_map_coverage, state_map_data, unmatched_state_data):
         ).update_geos(scope="usa", visible=False)
     mo.vstack(
         [
-            mo.md(
-                "State-map hover values report the matched and universe shares within the "
-                "United States."
-            ),
             _figure,
-            mo.md(
-                f"The state-code mapping covers **{state_map_coverage:.2%}** of matched U.S. "
-                "hires."
-            ),
             mo.accordion(
                 {
                     "View unmatched U.S. state labels": mo.ui.table(
@@ -1377,9 +1709,39 @@ def _(mo, px, state_map_coverage, state_map_data, unmatched_state_data):
 
 
 @app.cell
-def _(alt, distribution_table, fnh, mo, pd, universe_fnh):
-    matched = distribution_table(fnh, "seniority")[["display_label", "count", "share"]].copy()
-    baseline = distribution_table(universe_fnh, "seniority")[["display_label", "share"]].copy()
+def _(country_selector_options, mo):
+    seniority_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    return (seniority_country_selector,)
+
+
+@app.cell
+def _(
+    alt,
+    distribution_table,
+    filter_country_scope,
+    fnh,
+    mo,
+    pd,
+    seniority_country_selector,
+    universe_fnh,
+):
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        seniority_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        seniority_country_selector.value,
+    )
+    matched = distribution_table(_matched_scope, "seniority")[
+        ["display_label", "count", "share"]
+    ].copy()
+    baseline = distribution_table(_universe_scope, "seniority")[["display_label", "share"]].copy()
     baseline = baseline.rename(columns={"share": "baseline_share"})
     seniority = matched.merge(baseline, on="display_label", how="outer").fillna(0.0)
     seniority["sample"] = "Inventor-matched"
@@ -1423,17 +1785,66 @@ def _(alt, distribution_table, fnh, mo, pd, universe_fnh):
                 alt.Tooltip("share:Q", title="Share", format=".2%"),
             ],
         )
-        .properties(width="container", height=380)
+        .properties(
+            width="container",
+            height=380,
+            title=alt.TitleParams(
+                text=f"Seniority distribution — {_scope_label}",
+                anchor="start",
+            ),
+        )
         .configure_view(stroke=None)
     )
-    mo.vstack([mo.md("### 5.2. Seniority distribution"), _figure], gap=1)
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### 5.2. Seniority distribution
+
+                - Matched sample has a different seniority distribution compared with all candidate new hires.
+                - Again, as I have said before, this could have serious implications for our interpretations of the patents-based productivity results.
+                - Firms that hire workers at later career stages may inherit larger pre-hire patent stocks.
+                """
+            ),
+            seniority_country_selector,
+            _figure,
+        ],
+        gap=1,
+    )
     return
 
 
 @app.cell
-def _(alt, fnh, mo, pd, universe_fnh):
+def _(country_selector_options, mo):
+    time_series_country_selector = mo.ui.multiselect(
+        options=country_selector_options,
+        value=["All countries"],
+        label="Countries",
+        full_width=True,
+    )
+    return (time_series_country_selector,)
+
+
+@app.cell
+def _(
+    alt,
+    filter_country_scope,
+    fnh,
+    mo,
+    pd,
+    time_series_country_selector,
+    universe_fnh,
+):
+    _matched_scope, _scope_label = filter_country_scope(
+        fnh,
+        time_series_country_selector.value,
+    )
+    _universe_scope, _ = filter_country_scope(
+        universe_fnh,
+        time_series_country_selector.value,
+    )
     matched_series = (
-        fnh.dropna(subset=["start_month"])
+        _matched_scope.dropna(subset=["start_month"])
         .assign(
             start_month=lambda data: (
                 pd.to_datetime(data["start_month"]).dt.to_period("M").dt.to_timestamp()
@@ -1444,7 +1855,7 @@ def _(alt, fnh, mo, pd, universe_fnh):
         .rename("matched_count")
     )
     baseline_series = (
-        universe_fnh.dropna(subset=["start_month"])
+        _universe_scope.dropna(subset=["start_month"])
         .assign(
             start_month=lambda data: (
                 pd.to_datetime(data["start_month"]).dt.to_period("M").dt.to_timestamp()
@@ -1499,7 +1910,14 @@ def _(alt, fnh, mo, pd, universe_fnh):
                 ),
             ],
         )
-        .properties(width="container", height=320)
+        .properties(
+            width="container",
+            height=320,
+            title=alt.TitleParams(
+                text=f"Inventor-matched hires over time — {_scope_label}",
+                anchor="start",
+            ),
+        )
         .configure_view(stroke=None)
     )
     _share_figure = (
@@ -1527,18 +1945,21 @@ def _(alt, fnh, mo, pd, universe_fnh):
                 ),
             ],
         )
-        .properties(width="container", height=360)
+        .properties(
+            width="container",
+            height=360,
+            title=alt.TitleParams(
+                text=f"Monthly composition by sample — {_scope_label}",
+                anchor="start",
+            ),
+        )
         .configure_view(stroke=None)
     )
     mo.vstack(
         [
             mo.md("### 5.3. Time-series"),
-            mo.md("Monthly count of inventor-matched candidate focal new hires."),
+            time_series_country_selector,
             _count_figure,
-            mo.md(
-                "Monthly shares compare the timing composition of the matched and universe "
-                "samples on a common scale."
-            ),
             _share_figure,
         ],
         gap=1,

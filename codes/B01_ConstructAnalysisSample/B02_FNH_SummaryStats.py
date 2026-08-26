@@ -36,6 +36,8 @@ def _(mo):
     - This notebook describes the broadest universe of candidate focal new hires.
     - The observation unit is at **user-company** level: one user can appear more than once when they are observed as a new hire at different companies.
     - All distributions below are simple averages over these user-company observations.
+    - Industry views retain categories with at least 1,000 all-country user-company
+      observations, rank the eligible table once, and apply Top-N only for display.
 
     The purpose of this notebook:
     - It is **not** as a description of the final research sample.
@@ -49,6 +51,7 @@ def _(mo):
 @app.cell
 def _(alt, math, pd, pycountry, re):
     MISSING_LABEL = "<Missing>"
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES = 1_000
     US_LABEL = "United States"
     ALL_COUNTRIES_SCOPE = "__all__"
     US_SCOPE = "__us__"
@@ -105,9 +108,16 @@ def _(alt, math, pd, pycountry, re):
         working["occupation_label"] = working[occupation_column]
         if occupation_title:
             working["occupation_label"] += " — " + working[occupation_title]
+        working["industry_value"] = working[industry_column]
+        working["occupation_value"] = working[occupation_column]
         summary = (
             working.groupby(
-                ["industry_label", "occupation_label"],
+                [
+                    "industry_value",
+                    "industry_label",
+                    "occupation_value",
+                    "occupation_label",
+                ],
                 dropna=False,
                 observed=True,
             )
@@ -130,6 +140,18 @@ def _(alt, math, pd, pycountry, re):
         summary = distribution_table(data, value_column, title_column)
         summary = summary.loc[summary["value"] != MISSING_LABEL].drop_duplicates("value")
         return dict(zip(summary["display_label"], summary["value"], strict=True))
+
+    def restrict_to_eligible_industries(
+        summary,
+        eligible_values,
+        value_column="value",
+    ):
+        result = summary.loc[
+            summary[value_column].astype("string").isin(eligible_values)
+        ].copy()
+        result = result.reset_index(drop=True)
+        result["rank"] = range(1, len(result) + 1)
+        return result
 
     def available_country_options(data):
         countries = sorted(
@@ -430,6 +452,7 @@ def _(alt, math, pd, pycountry, re):
 
     return (
         MISSING_LABEL,
+        MIN_ALL_COUNTRY_INDUSTRY_HIRES,
         available_country_options,
         category_selector_options,
         country_iso3,
@@ -440,6 +463,7 @@ def _(alt, math, pd, pycountry, re):
         joint_distribution_table,
         make_crosswalk_chart,
         make_share_chart,
+        restrict_to_eligible_industries,
         us_state_code,
     )
 
@@ -540,6 +564,7 @@ def _(
     AVAILABLE_ROLE_COLUMNS,
     EXPECTED_RICS_COLUMNS,
     EXPECTED_ROLE_COLUMNS,
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES,
     MISSING_LABEL,
     available_country_options,
     crosswalk_table,
@@ -584,6 +609,25 @@ def _(
     distribution_tables = {
         column: distribution_table(fnh, column, title_columns.get(column))
         for column in classification_columns
+    }
+    _industry_columns = ("naics_code", *AVAILABLE_RICS_COLUMNS)
+
+    def _eligible_industry_values(column):
+        _counts = (
+            fnh[column]
+            .fillna(MISSING_LABEL)
+            .astype("string")
+            .value_counts(dropna=False)
+        )
+        return frozenset(
+            str(value)
+            for value, count in _counts.items()
+            if value != MISSING_LABEL and count >= MIN_ALL_COUNTRY_INDUSTRY_HIRES
+        )
+
+    eligible_industries_by_column = {
+        column: _eligible_industry_values(column)
+        for column in _industry_columns
     }
     if "role_k1500" in fnh.columns:
         _role_crosswalk_columns = [
@@ -699,6 +743,7 @@ def _(
         classification_stats,
         country_selector_options,
         default_industry_column,
+        eligible_industries_by_column,
         finest_rics_column,
         industry_selector_options,
         naics_rics_pairs,
@@ -1115,7 +1160,11 @@ def _(country_selector_options, mo):
         full_width=True,
     )
     naics_top_n_selector = mo.ui.number(
-        start=1, stop=2000, step=1, value=50, label="Number of top NAICS industries"
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of eligible NAICS industries",
     )
     return naics_country_selector, naics_top_n_selector
 
@@ -1123,15 +1172,21 @@ def _(country_selector_options, mo):
 @app.cell
 def _(
     distribution_table,
+    eligible_industries_by_column,
     filter_country_scope,
     fnh,
     make_share_chart,
     mo,
     naics_country_selector,
     naics_top_n_selector,
+    restrict_to_eligible_industries,
 ):
     _scope, _scope_label = filter_country_scope(fnh, naics_country_selector.value)
     _summary = distribution_table(_scope, "naics_code", "naics_description")
+    _summary = restrict_to_eligible_industries(
+        _summary,
+        eligible_industries_by_column["naics_code"],
+    )
     _chart = make_share_chart(
         _summary,
         f"Top NAICS industries — {_scope_label}",
@@ -1142,6 +1197,10 @@ def _(
             mo.md(
                 """
                 ### 3.1. NAICS distribution
+
+                Industries must have at least 1,000 candidate new hires in the all-country
+                sample. Top-N truncates the resulting count ranking and therefore reveals a
+                stable prefix.
                 """
             ),
             mo.hstack(
@@ -1153,7 +1212,7 @@ def _(
             _chart,
             mo.accordion(
                 {
-                    "View all NAICS categories": mo.ui.table(
+                    "View all eligible NAICS categories": mo.ui.table(
                         _summary,
                         pagination=True,
                         page_size=20,
@@ -1181,7 +1240,11 @@ def _(AVAILABLE_RICS_COLUMNS, country_selector_options, mo):
         label="Revelio industry variable",
     )
     rics_top_n_selector = mo.ui.number(
-        start=1, stop=2000, step=1, value=50, label="Number of top Revelio industries"
+        start=1,
+        stop=2000,
+        step=1,
+        value=50,
+        label="Number of eligible Revelio industries",
     )
     return rics_country_selector, rics_top_n_selector, rics_variable_selector
 
@@ -1189,6 +1252,7 @@ def _(AVAILABLE_RICS_COLUMNS, country_selector_options, mo):
 @app.cell
 def _(
     distribution_table,
+    eligible_industries_by_column,
     filter_country_scope,
     fnh,
     make_share_chart,
@@ -1196,11 +1260,16 @@ def _(
     rics_country_selector,
     rics_top_n_selector,
     rics_variable_selector,
+    restrict_to_eligible_industries,
 ):
     _variable = rics_variable_selector.value
     _top_n = int(rics_top_n_selector.value)
     _scope, _scope_label = filter_country_scope(fnh, rics_country_selector.value)
     _summary = distribution_table(_scope, _variable)
+    _summary = restrict_to_eligible_industries(
+        _summary,
+        eligible_industries_by_column[_variable],
+    )
     _chart = make_share_chart(
         _summary,
         f"Top {_top_n} industries in {_variable} — {_scope_label}",
@@ -1214,6 +1283,8 @@ def _(
 
                 - The `rics_k400` view is a practical starting point for defining industries.
                 - NAICS can be used for robustness checks to see whether conclusions depend on the proprietary Revelio classification.
+                - Industry eligibility requires at least 1,000 candidate new hires in the
+                  all-country sample; Top-N only truncates the stable eligible ranking.
                 """
             ),
             mo.hstack(
@@ -1225,7 +1296,7 @@ def _(
             _chart,
             mo.accordion(
                 {
-                    "View all Revelio industry categories": mo.ui.table(
+                    "View all eligible Revelio industry categories": mo.ui.table(
                         _summary,
                         pagination=True,
                         page_size=20,
@@ -1463,7 +1534,7 @@ def _(
         stop=2000,
         step=1,
         value=50,
-        label="Number of top industry-occupation combinations",
+        label="Number of top eligible industry-occupation combinations",
     )
     return (
         industry_occupation_country_selector,
@@ -1492,6 +1563,7 @@ def _(mo):
 
 @app.cell
 def _(
+    eligible_industries_by_column,
     filter_country_scope,
     fnh,
     industry_occupation_country_selector,
@@ -1501,6 +1573,7 @@ def _(
     joint_distribution_table,
     make_share_chart,
     mo,
+    restrict_to_eligible_industries,
     title_columns,
 ):
     _industry_column = industry_occupation_industry_selector.value
@@ -1516,6 +1589,11 @@ def _(
         _occupation_column,
         title_columns,
     )
+    _summary = restrict_to_eligible_industries(
+        _summary,
+        eligible_industries_by_column[_industry_column],
+        value_column="industry_value",
+    )
     _chart = make_share_chart(
         _summary,
         f"Top {_top_n} industry-occupation combinations — {_scope_label}",
@@ -1529,7 +1607,9 @@ def _(
 
                 - Each bar reports the share of the universe sample in an industry-occupation combination within the selected country scope.
                 - Joint cells reveal concentrations that can be hidden in the separate occupation and industry distributions.
-                - The Top-N control changes the number of combinations displayed, not the denominator used to calculate shares.
+                - Industries must have at least 1,000 candidate new hires in the all-country
+                  sample. The Top-N control changes the number of eligible combinations displayed,
+                  not the denominator used to calculate shares.
                 """
             ),
             mo.hstack(
@@ -1553,7 +1633,7 @@ def _(
             _chart,
             mo.accordion(
                 {
-                    "View industry-occupation combinations": mo.ui.table(
+                    "View eligible industry-occupation combinations": mo.ui.table(
                         _summary,
                         pagination=True,
                         page_size=20,
@@ -1612,6 +1692,7 @@ def _(
 @app.cell
 def _(
     category_selector_options,
+    eligible_industries_by_column,
     fnh,
     mo,
     occupation_within_industry_industry_variable_selector,
@@ -1623,6 +1704,12 @@ def _(
         _industry_column,
         title_columns.get(_industry_column),
     )
+    _eligible_values = eligible_industries_by_column[_industry_column]
+    _industry_options = {
+        label: value
+        for label, value in _industry_options.items()
+        if value in _eligible_values
+    }
     _default_industries = (
         "Biotechnology and Life Sciences",
         "Pharmaceutical Manufacturing",
@@ -1688,6 +1775,8 @@ def _(
 
                 - The selected industries are pooled before calculating the occupation shares.
                 - Each bar reports an occupation's share of universe-sample hires in the selected country and industry set.
+                - The industry selector includes only categories with at least 1,000 candidate
+                  new hires in the all-country sample.
                 """
             ),
             mo.hstack(
@@ -1758,7 +1847,7 @@ def _(
         stop=2000,
         step=1,
         value=50,
-        label="Number of top industries",
+        label="Number of eligible industries",
     )
     return (
         industry_within_occupation_country_selector,
@@ -1808,6 +1897,7 @@ def _(
 @app.cell
 def _(
     distribution_table,
+    eligible_industries_by_column,
     filter_country_scope,
     fnh,
     industry_within_occupation_country_selector,
@@ -1817,6 +1907,7 @@ def _(
     industry_within_occupation_top_n_selector,
     make_share_chart,
     mo,
+    restrict_to_eligible_industries,
     title_columns,
 ):
     _industry_column = industry_within_occupation_industry_variable_selector.value
@@ -1834,6 +1925,10 @@ def _(
         _selected_scope,
         _industry_column,
         title_columns.get(_industry_column),
+    )
+    _summary = restrict_to_eligible_industries(
+        _summary,
+        eligible_industries_by_column[_industry_column],
     )
     _figure = (
         make_share_chart(
@@ -1853,6 +1948,8 @@ def _(
 
                 - The selected occupations are pooled before calculating the industry shares.
                 - Each bar reports an industry's share of universe-sample hires in the selected country and occupation set.
+                - Only industries with at least 1,000 candidate new hires in the all-country
+                  sample are eligible; Top-N truncates their stable count ranking.
                 """
             ),
             mo.hstack(

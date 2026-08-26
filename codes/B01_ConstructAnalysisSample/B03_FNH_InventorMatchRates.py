@@ -24,6 +24,8 @@ Notes:
 (7) Country results retain economies with at least 1,000 candidate user-company observations,
     rank the eligible set by the selected match rate, and apply Top-N only after ranking.
 (8) Analysis tables behind Top-N charts are constructed before Top-N is applied.
+(9) Industry results retain categories with at least 1,000 all-country candidate user-company
+    observations, rank the eligible set once, and apply Top-N only for display.
 
 Run:
     $fnh_match_notebook = "codes/B01_ConstructAnalysisSample/B03_FNH_InventorMatchRates.py"
@@ -62,14 +64,17 @@ def imports():
 def title(mo):
     mo.vstack(
         [
-            mo.md(
-                "# Inventor match rates among candidate focal new hires\n\n"
-                "This notebook compares the candidate focal-new-hire universe constructed from "
-                "`A_FocalNewHires_AllIndustries.ipynb` with the Revelio-to-PatentsView inventor "
-                "crosswalk. The figures report linkage coverage, not a complete measure of "
-                "inventive productivity. Controls are placed next to the result that they "
-                "change."
-            )
+            mo.md("""
+                # Inventor match rates among candidate focal new hires
+
+                The inventor database:
+                - Gaurav sent me a list of users that can be matched to an inventor ID (or multiple inventor IDs).
+                    - It is at user-level (if we temporarily ignore the small set of users who have multiple inventor IDs). I will call it the **inventor database**.
+                    - I merge the universe sample of candidate focal new hires with the inventor database.
+                - This section is mainly about heterogeneous match rates across occupations, industries, and countries.
+                    - Match rates can be calculated at two levels: user-company level, and user level. The results are similar for these two different levels.
+                    - As expected, there is huge difference in match rates across countries.
+                """)
         ]
     )
     return
@@ -78,6 +83,7 @@ def title(mo):
 @app.cell
 def helpers(alt, pd, pl, pycountry, re):
     MISSING_LABEL = "<Missing>"
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES = 1_000
     MIN_COUNTRY_CANDIDATE_SPELLS = 1_000
     US_LABEL = "United States"
     METRIC_OPTIONS = {
@@ -124,10 +130,7 @@ def helpers(alt, pd, pl, pycountry, re):
             pl.len().alias("candidate_spells"),
             pl.col("inventor_match").cast(pl.Int64).sum().alias("matched_spells"),
             pl.col("user_id").n_unique().alias("unique_users"),
-            pl.col("user_id")
-            .filter(pl.col("inventor_match"))
-            .n_unique()
-            .alias("matched_users"),
+            pl.col("user_id").filter(pl.col("inventor_match")).n_unique().alias("matched_users"),
         ]
 
     def add_rate_statistics(summary):
@@ -153,14 +156,8 @@ def helpers(alt, pd, pl, pycountry, re):
             _z = 1.96
             _denominator = 1.0 + _z**2 / _n
             _center = (_p + _z**2 / (2.0 * _n)) / _denominator
-            _margin = (
-                _z
-                * (_p * (1.0 - _p) / _n + _z**2 / (4.0 * _n**2)) ** 0.5
-                / _denominator
-            )
-            return (_center - _margin).clip(lower=0.0), (_center + _margin).clip(
-                upper=1.0
-            )
+            _margin = _z * (_p * (1.0 - _p) / _n + _z**2 / (4.0 * _n**2)) ** 0.5 / _denominator
+            return (_center - _margin).clip(lower=0.0), (_center + _margin).clip(upper=1.0)
 
         _spell_n = _result["candidate_spells"].astype(float)
         _user_n = _result["unique_users"].astype(float)
@@ -172,12 +169,8 @@ def helpers(alt, pd, pl, pycountry, re):
             _result["matched_users"],
             _user_n,
         )
-        _result["spell_match_rate"] = (_result["matched_spells"] / _spell_n).where(
-            _spell_n > 0
-        )
-        _result["user_match_rate"] = (_result["matched_users"] / _user_n).where(
-            _user_n > 0
-        )
+        _result["spell_match_rate"] = (_result["matched_spells"] / _spell_n).where(_spell_n > 0)
+        _result["user_match_rate"] = (_result["matched_users"] / _user_n).where(_user_n > 0)
         _result["spell_ci_low"] = _spell_low
         _result["spell_ci_high"] = _spell_high
         _result["user_ci_low"] = _user_low
@@ -214,9 +207,7 @@ def helpers(alt, pd, pl, pycountry, re):
             .to_pandas()
         )
         _summary = add_rate_statistics(_summary)
-        _summary["group_value"] = (
-            _summary[value_column].map(_display_value).astype("string")
-        )
+        _summary["group_value"] = _summary[value_column].map(_display_value).astype("string")
         if title_column is None:
             _summary["display_label"] = _summary["group_value"]
         else:
@@ -234,10 +225,7 @@ def helpers(alt, pd, pl, pycountry, re):
             pl.len().alias("candidate_spells"),
             pl.col("inventor_match").cast(pl.Int64).sum().alias("matched_spells"),
             pl.col("user_id").n_unique().alias("unique_users"),
-            pl.col("user_id")
-            .filter(pl.col("inventor_match"))
-            .n_unique()
-            .alias("matched_users"),
+            pl.col("user_id").filter(pl.col("inventor_match")).n_unique().alias("matched_users"),
         ).to_dicts()[0]
         _row["spell_match_rate"] = (
             _row["matched_spells"] / _row["candidate_spells"]
@@ -245,9 +233,7 @@ def helpers(alt, pd, pl, pycountry, re):
             else float("nan")
         )
         _row["user_match_rate"] = (
-            _row["matched_users"] / _row["unique_users"]
-            if _row["unique_users"]
-            else float("nan")
+            _row["matched_users"] / _row["unique_users"] if _row["unique_users"] else float("nan")
         )
         return _row
 
@@ -284,10 +270,7 @@ def helpers(alt, pd, pl, pycountry, re):
                 data.filter(
                     pl.col("country").is_in(_selected)
                     if _selected
-                    else (
-                        (pl.col("country") != US_LABEL)
-                        & (pl.col("country") != MISSING_LABEL)
-                    )
+                    else ((pl.col("country") != US_LABEL) & (pl.col("country") != MISSING_LABEL))
                 ),
             ),
         )
@@ -342,9 +325,7 @@ def helpers(alt, pd, pl, pycountry, re):
         return pd.concat(_summaries, ignore_index=True)
 
     def _chart_tooltips(metric, include_scope=False):
-        _rate_column, _low_column, _high_column, _matched_column = metric_columns(
-            metric
-        )
+        _rate_column, _low_column, _high_column, _matched_column = metric_columns(metric)
         _tooltips = []
         if include_scope:
             _tooltips.append(alt.Tooltip("country_scope:N", title="Country scope"))
@@ -392,8 +373,7 @@ def helpers(alt, pd, pl, pycountry, re):
         if _valid.empty:
             return None
         _values = "  |  ".join(
-            f"{_row.reference_scope}: {_row.reference_rate:.2%}"
-            for _row in _valid.itertuples()
+            f"{_row.reference_scope}: {_row.reference_rate:.2%}" for _row in _valid.itertuples()
         )
         return f"Reference lines — {_values}"
 
@@ -449,24 +429,27 @@ def helpers(alt, pd, pl, pycountry, re):
         top_n,
         color_range,
         reference_rates,
+        minimum_candidate_spells=0,
     ):
-        """Select large categories, then rank their bars by the all-country rate."""
+        """Rank an eligible all-country table once, then display its Top-N prefix."""
 
         _rate_column, _, _high_column, _ = metric_columns(metric)
         _all_country = summary.loc[
-            (summary["scope_key"] == "all") & (summary["group_value"] != MISSING_LABEL)
+            (summary["scope_key"] == "all")
+            & (summary["group_value"] != MISSING_LABEL)
+            & (summary["candidate_spells"] >= int(minimum_candidate_spells))
         ].copy()
         _largest = _all_country.sort_values(
             ["candidate_spells", "display_label"],
             ascending=[False, True],
         )
-        _top_values = _largest.head(int(top_n))["group_value"].tolist()
         _rate_ranking = _all_country.sort_values(
-            [_rate_column, "candidate_spells"],
-            ascending=[False, False],
+            [_rate_column, "candidate_spells", "display_label"],
+            ascending=[False, False, True],
             na_position="last",
         )
-        _ranked = _rate_ranking.loc[_rate_ranking["group_value"].isin(_top_values)]
+        _ranked = _rate_ranking.head(int(top_n)).copy()
+        _top_values = _ranked["group_value"].tolist()
         _shown = summary.loc[summary["group_value"].isin(_top_values)].copy()
         _candidate_rank = dict(
             zip(_largest["group_value"], range(1, len(_largest) + 1), strict=True)
@@ -478,15 +461,14 @@ def helpers(alt, pd, pl, pycountry, re):
                 strict=True,
             )
         )
-        _analysis_table = summary.loc[
-            summary["group_value"] != MISSING_LABEL
-        ].copy()
-        _analysis_table["all_country_candidate_rank"] = _analysis_table[
-            "group_value"
-        ].map(_candidate_rank)
-        _analysis_table["all_country_match_rate_rank"] = _analysis_table[
-            "group_value"
-        ].map(_rate_rank)
+        _eligible_values = _all_country["group_value"].tolist()
+        _analysis_table = summary.loc[summary["group_value"].isin(_eligible_values)].copy()
+        _analysis_table["all_country_candidate_rank"] = _analysis_table["group_value"].map(
+            _candidate_rank
+        )
+        _analysis_table["all_country_match_rate_rank"] = _analysis_table["group_value"].map(
+            _rate_rank
+        )
         _scope_rank = dict(
             zip(
                 summary["scope_key"].drop_duplicates(),
@@ -496,17 +478,13 @@ def helpers(alt, pd, pl, pycountry, re):
         )
         _analysis_table["_scope_rank"] = _analysis_table["scope_key"].map(_scope_rank)
         _analysis_table = _analysis_table.sort_values(
-            ["all_country_candidate_rank", "_scope_rank"]
+            ["all_country_match_rate_rank", "_scope_rank"]
         ).drop(columns="_scope_rank")
         if _shown.empty:
             return None, _analysis_table
 
-        _category_order = _ranked.loc[
-            _ranked["group_value"].isin(_top_values), "display_label"
-        ].tolist()
-        _scope_order = [
-            _scope for _scope in summary["country_scope"].drop_duplicates().tolist()
-        ]
+        _category_order = _ranked["display_label"].tolist()
+        _scope_order = [_scope for _scope in summary["country_scope"].drop_duplicates().tolist()]
         _shown["country_scope"] = pd.Categorical(
             _shown["country_scope"],
             categories=_scope_order,
@@ -577,9 +555,7 @@ def helpers(alt, pd, pl, pycountry, re):
         _shown = summary.loc[summary["group_value"] != MISSING_LABEL].copy()
         if _shown.empty:
             return None, _shown
-        _shown["seniority_order"] = pd.to_numeric(
-            _shown["group_value"], errors="coerce"
-        )
+        _shown["seniority_order"] = pd.to_numeric(_shown["group_value"], errors="coerce")
         _category_order = (
             _shown[["display_label", "seniority_order"]]
             .drop_duplicates()
@@ -794,19 +770,13 @@ def helpers(alt, pd, pl, pycountry, re):
         if summary.empty:
             return None
         _valid = summary.dropna(subset=["match_rate"]).copy()
-        _color_max = (
-            max(float(_valid["match_rate"].max()), 0.01) if not _valid.empty else 0.01
-        )
+        _color_max = max(float(_valid["match_rate"].max()), 0.01) if not _valid.empty else 0.01
         _text_threshold = _color_max * 0.55
         _candidate_title = (
-            "Candidate user-company observations"
-            if metric == "spell"
-            else "Candidate users"
+            "Candidate user-company observations" if metric == "spell" else "Candidate users"
         )
         _matched_title = (
-            "Matched user-company observations"
-            if metric == "spell"
-            else "Matched users"
+            "Matched user-company observations" if metric == "spell" else "Matched users"
         )
         _x = alt.X(
             "industry_label:N",
@@ -1002,6 +972,7 @@ def helpers(alt, pd, pl, pycountry, re):
 
     return (
         METRIC_OPTIONS,
+        MIN_ALL_COUNTRY_INDUSTRY_HIRES,
         MIN_COUNTRY_CANDIDATE_SPELLS,
         MISSING_LABEL,
         RATE_TABLE_FORMATS,
@@ -1143,9 +1114,7 @@ def load_data(
                 ),
                 "Maximum rows per user": int(_link_user_counts["len"].max() or 0),
                 "Missing user IDs": int(_patent_links["user_id"].null_count()),
-                "Missing inventor IDs": int(
-                    _patent_links["pv_inventor_id"].null_count()
-                ),
+                "Missing inventor IDs": int(_patent_links["pv_inventor_id"].null_count()),
                 "Blank inventor IDs": int(
                     _patent_links.select((pl.col("pv_inventor_id") == "").sum()).item()
                 ),
@@ -1158,9 +1127,7 @@ def load_data(
         for _column in ANALYSIS_COLUMNS
         if _column not in {"user_id", "seniority", DATE_COLUMN}
     )
-    _matched_users = _patent_users.lazy().with_columns(
-        pl.lit(True).alias("inventor_match")
-    )
+    _matched_users = _patent_users.lazy().with_columns(pl.lit(True).alias("inventor_match"))
     _fnh_scan = (
         pl.scan_parquet(str(INPUT_DIR / "*.parquet"))
         .select(list(ANALYSIS_COLUMNS))
@@ -1238,9 +1205,7 @@ def basic_numbers(
         ("United States", fnh.filter(pl.col("country") == US_LABEL)),
         (
             "Non-U.S.",
-            fnh.filter(
-                (pl.col("country") != US_LABEL) & (pl.col("country") != MISSING_LABEL)
-            ),
+            fnh.filter((pl.col("country") != US_LABEL) & (pl.col("country") != MISSING_LABEL)),
         ),
     )
     _rows = []
@@ -1267,11 +1232,12 @@ def basic_numbers(
     basic_numbers_table = pd.DataFrame(_rows)
     mo.vstack(
         [
-            mo.md(
-                "## 1. Basic numbers\n\n"
-                "The all-country row includes any retained records with a missing country. "
-                "The U.S. and non-U.S. rows exclude missing-country records."
-            ),
+            mo.md("""
+                # 1. Basic numbers
+
+                - Baseline all-country match rate for all candidate focal new hires is around 1.4%.
+                - US match rate is around 3.9%; while non-US match rate is around 0.7%.
+                """),
             mo.ui.table(
                 basic_numbers_table,
                 pagination=False,
@@ -1286,9 +1252,7 @@ def basic_numbers(
                         show_column_summaries=False,
                     ),
                     "Country coverage": mo.ui.table(
-                        pd.DataFrame(
-                            {"Nonmissing countries": [len(available_countries(fnh))]}
-                        ),
+                        pd.DataFrame({"Nonmissing countries": [len(available_countries(fnh))]}),
                         pagination=False,
                         show_column_summaries=False,
                     ),
@@ -1351,9 +1315,7 @@ def occupation_top_n_control(MISSING_LABEL, fnh, mo, occupation_selector, pl):
     )
     _max_categories = max(1, _category_count)
     _default_categories = (
-        _max_categories
-        if _occupation_column == "onet_code"
-        else min(50, _max_categories)
+        _max_categories if _occupation_column == "onet_code" else min(50, _max_categories)
     )
     occupation_top_n_selector = mo.ui.slider(
         start=1,
@@ -1398,10 +1360,7 @@ def occupation_rates(
     )
     occupation_chart, occupation_plot_table = make_grouped_rate_chart(
         occupation_summary,
-        (
-            f"Inventor {metric_label(occupation_metric)}-level match rates by "
-            f"{occupation_title}"
-        ),
+        (f"Inventor {metric_label(occupation_metric)}-level match rates by {occupation_title}"),
         occupation_metric,
         occupation_top_n_selector.value,
         ["#2563EB", "#0F766E", "#B45309"],
@@ -1415,12 +1374,8 @@ def occupation_rates(
         occupation_summary["scope_key"] == occupation_table_scope_selector.value
     ].copy()
     occupation_table = occupation_table.drop(columns=["scope_key"], errors="ignore")
-    occupation_note = (
-        "The top categories are selected by their all-country candidate counts, then the "
-        "bars are ranked by the selected all-country match rate. The selected countries "
-        "replace, rather than add to, the non-U.S. series. The analysis table is computed "
-        "before Top-N is applied."
-    )
+    occupation_note = "Match rates are higher within U.S. new hires than non-U.S. new hires for almost all occupations."
+
     return (
         occupation_chart,
         occupation_note,
@@ -1469,7 +1424,14 @@ def occupation_output(
     )
     mo.vstack(
         [
-            mo.md("## 2. Match rates across different occupations"),
+            mo.md(
+                """
+                ## 2. Match rates across different occupations
+
+                - As discussed before, several ONET occupations arise from problematic Revelio role mappings.
+                - Therefore, it is necessary to compare classification systems and inspect the exact denominators before interpreting a high match rate substantively.
+                """
+            ),
             mo.vstack(
                 [
                     occupation_metric_selector,
@@ -1483,7 +1445,7 @@ def occupation_output(
             _figure,
             mo.accordion(
                 {
-                    "View analysis table behind the figure (stable across Top-N)": mo.ui.table(
+                    "View analysis table behind the figure": mo.ui.table(
                         occupation_plot_table,
                         pagination=True,
                         page_size=20,
@@ -1497,9 +1459,7 @@ def occupation_output(
                         show_column_summaries=False,
                         format_mapping=RATE_TABLE_FORMATS,
                     ),
-                    "View all occupation statistics by country scope": (
-                        _all_categories_table
-                    ),
+                    "View all occupation statistics by country scope": (_all_categories_table),
                 }
             ),
         ],
@@ -1551,12 +1511,21 @@ def industry_controls(
 
 
 @app.cell
-def industry_top_n_control(MISSING_LABEL, fnh, industry_selector, mo, pl):
+def industry_top_n_control(
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES,
+    MISSING_LABEL,
+    fnh,
+    industry_selector,
+    mo,
+    pl,
+):
     _industry_column = industry_selector.value
-    _category_count = int(
+    _category_count = (
         fnh.filter(pl.col(_industry_column) != MISSING_LABEL)
-        .select(pl.col(_industry_column).n_unique())
-        .item()
+        .group_by(_industry_column)
+        .len()
+        .filter(pl.col("len") >= MIN_ALL_COUNTRY_INDUSTRY_HIRES)
+        .height
     )
     _max_categories = max(1, _category_count)
     industry_top_n_selector = mo.ui.slider(
@@ -1565,7 +1534,7 @@ def industry_top_n_control(MISSING_LABEL, fnh, industry_selector, mo, pl):
         value=min(50, _max_categories),
         step=1,
         show_value=True,
-        label="Number of industry categories in the bar chart",
+        label="Number of eligible industry categories in the bar chart",
         full_width=True,
     )
     return (industry_top_n_selector,)
@@ -1575,6 +1544,7 @@ def industry_top_n_control(MISSING_LABEL, fnh, industry_selector, mo, pl):
 def industry_rates(
     INDUSTRY_LABELS,
     INDUSTRY_TITLES,
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES,
     fnh,
     industry_country_selector,
     industry_metric_selector,
@@ -1602,29 +1572,31 @@ def industry_rates(
     )
     industry_chart, industry_plot_table = make_grouped_rate_chart(
         industry_summary,
-        (
-            f"Inventor {metric_label(industry_metric)}-level match rates by "
-            f"{industry_title}"
-        ),
+        (f"Inventor {metric_label(industry_metric)}-level match rates by {industry_title}"),
         industry_metric,
         industry_top_n_selector.value,
         ["#B45309", "#2563EB", "#0F766E"],
         industry_reference_table,
+        minimum_candidate_spells=MIN_ALL_COUNTRY_INDUSTRY_HIRES,
     )
     industry_plot_table = industry_plot_table.drop(
         columns=["scope_key"],
         errors="ignore",
     )
+    _eligible_values = industry_summary.loc[
+        (industry_summary["scope_key"] == "all")
+        & (industry_summary["candidate_spells"] >= MIN_ALL_COUNTRY_INDUSTRY_HIRES),
+        "group_value",
+    ]
     industry_table = industry_summary.loc[
-        industry_summary["scope_key"] == industry_table_scope_selector.value
+        (industry_summary["scope_key"] == industry_table_scope_selector.value)
+        & industry_summary["group_value"].isin(_eligible_values)
     ].copy()
     industry_table = industry_table.drop(columns=["scope_key"], errors="ignore")
-    industry_note = (
-        "The top categories are selected by their all-country candidate counts, then the "
-        "bars are ranked by the selected all-country match rate. The selected countries "
-        "replace, rather than add to, the non-U.S. series. The analysis table is computed "
-        "before Top-N is applied."
-    )
+    industry_note = f"""
+        Industries must have at least {MIN_ALL_COUNTRY_INDUSTRY_HIRES:,} candidate new hires in the all-country sample.
+        This is to avoid some small-sized industries have an extremely higher match rates.
+        """
     return (
         industry_chart,
         industry_note,
@@ -1673,7 +1645,14 @@ def industry_output(
     )
     mo.vstack(
         [
-            mo.md("## 3. Match rates across different industries"),
+            mo.md(
+                """
+                ## 3. Match rates across different industries
+
+                - The results are quite aligned with our expectations.
+                    - Electronics and BioPharma are industries with relatively high match rates.
+                """
+            ),
             mo.vstack(
                 [
                     industry_metric_selector,
@@ -1687,7 +1666,7 @@ def industry_output(
             _figure,
             mo.accordion(
                 {
-                    "View analysis table behind the figure (stable across Top-N)": mo.ui.table(
+                    "View analysis table behind the figure": mo.ui.table(
                         industry_plot_table,
                         pagination=True,
                         page_size=20,
@@ -1701,9 +1680,7 @@ def industry_output(
                         show_column_summaries=False,
                         format_mapping=RATE_TABLE_FORMATS,
                     ),
-                    "View all industry statistics by country scope": (
-                        _all_categories_table
-                    ),
+                    "View all industry statistics by country scope": (_all_categories_table),
                 }
             ),
         ],
@@ -1766,6 +1743,7 @@ def industry_occupation_controls(
 def industry_occupation_category_controls(
     INDUSTRY_LABELS,
     INDUSTRY_TITLES,
+    MIN_ALL_COUNTRY_INDUSTRY_HIRES,
     MISSING_LABEL,
     OCCUPATION_LABELS,
     OCCUPATION_TITLES,
@@ -1788,7 +1766,8 @@ def industry_occupation_category_controls(
         _industry_title_column,
     )
     io_industry_category_table = io_industry_category_table.loc[
-        io_industry_category_table["group_value"] != MISSING_LABEL
+        (io_industry_category_table["group_value"] != MISSING_LABEL)
+        & (io_industry_category_table["candidate_spells"] >= MIN_ALL_COUNTRY_INDUSTRY_HIRES)
     ].copy()
     io_occupation_category_table = classification_match_rates(
         fnh,
@@ -1835,9 +1814,7 @@ def industry_occupation_category_controls(
         if _value in _industry_label_by_value
     ]
     if not _default_industry_labels:
-        _default_industry_labels = io_industry_category_table.head(3)[
-            "display_label"
-        ].tolist()
+        _default_industry_labels = io_industry_category_table.head(3)["display_label"].tolist()
 
     _default_occupation_titles = [
         "Microbiologists",
@@ -1857,13 +1834,9 @@ def industry_occupation_category_controls(
             if not _matches.empty:
                 _default_occupation_labels.append(_matches.iloc[0])
     else:
-        _default_occupation_labels = io_occupation_category_table.head(6)[
-            "display_label"
-        ].tolist()
+        _default_occupation_labels = io_occupation_category_table.head(6)["display_label"].tolist()
     if not _default_occupation_labels:
-        _default_occupation_labels = io_occupation_category_table.head(6)[
-            "display_label"
-        ].tolist()
+        _default_occupation_labels = io_occupation_category_table.head(6)["display_label"].tolist()
 
     io_industry_values_selector = mo.ui.multiselect(
         options=_industry_options,
@@ -2015,17 +1988,13 @@ def industry_occupation_rates(
         )
         _grid["industry_label"] = _grid["industry_value"].map(_industry_labels)
         _grid["occupation_label"] = _grid["occupation_value"].map(_occupation_labels)
-        _industry_order = [
-            _industry_labels.get(_value, _value) for _value in _industry_values
-        ]
+        _industry_order = [_industry_labels.get(_value, _value) for _value in _industry_values]
         _occupation_order = [
             _occupation_labels.get(_value, _value) for _value in _occupation_values
         ]
 
         _metric = io_metric_selector.value
-        _rate_column, _low_column, _high_column, _matched_column = metric_columns(
-            _metric
-        )
+        _rate_column, _low_column, _high_column, _matched_column = metric_columns(_metric)
         _candidate_column = "candidate_spells" if _metric == "spell" else "unique_users"
         _grid["candidate_count"] = _grid[_candidate_column]
         _grid["matched_count"] = _grid[_matched_column]
@@ -2069,13 +2038,9 @@ def industry_occupation_rates(
         )
 
         _total_statistics = sample_statistics(_cell_data)
-        _total_candidate_key = (
-            "candidate_spells" if _metric == "spell" else "unique_users"
-        )
+        _total_candidate_key = "candidate_spells" if _metric == "spell" else "unique_users"
         _total_matched_key = "matched_spells" if _metric == "spell" else "matched_users"
-        _total_rate_key = (
-            "spell_match_rate" if _metric == "spell" else "user_match_rate"
-        )
+        _total_rate_key = "spell_match_rate" if _metric == "spell" else "user_match_rate"
         industry_occupation_totals = pd.DataFrame(
             [
                 {
@@ -2090,10 +2055,7 @@ def industry_occupation_rates(
                 }
             ]
         )
-        industry_occupation_note = (
-            "Each cell reports matched / candidate observations for the selected match-rate "
-            "definition. Gray cells have no candidate observations."
-        )
+        industry_occupation_note = ""
         if _metric == "user":
             industry_occupation_note += (
                 " A user appearing in multiple industry-occupation cells is distinct within "
@@ -2133,12 +2095,16 @@ def industry_occupation_output(
     )
     mo.vstack(
         [
-            mo.md("## 4. Match rates across industry-occupation cells"),
             mo.md(
-                "Select the two classifications, displayed categories, country scope, and "
-                "match-rate definition. Heatmap cells show the rate and matched / candidate "
-                "counts."
+                """
+                ## 4. Match rates across industry-occupation cells
+
+                - In the heatmap, I plot the match rates in selected industry-occupation cells.
+                - As discussed before, occupation names can be misleading sometimes.
+                - A reasonable workflow is to first determine the focal industry, and then select occupations based on occupation distribution and match rates within the selected industry.
+                """
             ),
+            mo.md("Heatmap cells show the match rate and matched / candidate counts. "),
             io_industry_variable_selector,
             io_industry_values_selector,
             io_occupation_variable_selector,
@@ -2242,9 +2208,7 @@ def country_rates(
     _country_map_working = country_summary.copy()
     _country_map_working["iso3"] = _country_map_working["group_value"].map(country_iso3)
     mapped_country_summary = _country_map_working.dropna(subset=["iso3"]).copy()
-    unmapped_country_summary = _country_map_working.loc[
-        _country_map_working["iso3"].isna()
-    ].copy()
+    unmapped_country_summary = _country_map_working.loc[_country_map_working["iso3"].isna()].copy()
     _rate_column, _, _, _ = metric_columns(country_metric)
     if mapped_country_summary.empty:
         country_map = None
@@ -2345,13 +2309,11 @@ def country_output(
         [
             mo.md("## 5. Other results"),
             mo.md("### 5.1. Match rates across economies"),
-            mo.md(
-                f"Countries must have at least **{MIN_COUNTRY_CANDIDATE_SPELLS:,}** "
-                "candidate focal new hires at the user-company level. The ranking table is "
-                "computed before Top-N is applied, so changing Top-N reveals a stable prefix. "
-                "Ranks use point estimates; the table retains the Wilson intervals. Reference "
-                "lines remain pooled rates for the full country scopes."
-            ),
+            mo.md(f"""
+                - Countries must have at least {MIN_COUNTRY_CANDIDATE_SPELLS:,} candidate focal new hires.
+                - This is to avoid some small-sized countries have unusually high match rates.
+                - US is not the country with the highest rate, though this partially reflects there are substantially more new hires in US (3,491,981) when comparing with e.g., South Korea (59,025).
+            """),
             country_metric_selector,
             country_top_n_selector,
             _bar,
@@ -2390,16 +2352,10 @@ def state_rates(
     state_metric = state_metric_selector.value
     us_fnh = fnh.filter(pl.col("country") == US_LABEL)
     state_summary = classification_match_rates(us_fnh, "state")
-    _state_map_working = state_summary.loc[
-        state_summary["group_value"] != MISSING_LABEL
-    ].copy()
-    _state_map_working["state_code"] = _state_map_working["group_value"].map(
-        us_state_code
-    )
+    _state_map_working = state_summary.loc[state_summary["group_value"] != MISSING_LABEL].copy()
+    _state_map_working["state_code"] = _state_map_working["group_value"].map(us_state_code)
     state_map_data = _state_map_working.dropna(subset=["state_code"]).copy()
-    unmapped_state_summary = _state_map_working.loc[
-        _state_map_working["state_code"].isna()
-    ].copy()
+    unmapped_state_summary = _state_map_working.loc[_state_map_working["state_code"].isna()].copy()
     _rate_column, _, _, _ = metric_columns(state_metric)
     if state_map_data.empty:
         state_map = None
@@ -2427,9 +2383,7 @@ def state_rates(
             },
             color_continuous_scale="Purples",
             range_color=(0.0, _color_max),
-            title=(
-                f"Inventor {metric_label(state_metric)}-level match rates across U.S. states"
-            ),
+            title=(f"Inventor {metric_label(state_metric)}-level match rates across U.S. states"),
         )
         state_map.update_geos(scope="usa", visible=False)
         state_map.update_layout(
@@ -2474,7 +2428,11 @@ def state_output(
     )
     mo.vstack(
         [
-            mo.md("### 5.2. Match rates across U.S. states"),
+            mo.md(
+                """
+                ### 5.2. Match rates across U.S. states
+                """
+            ),
             state_metric_selector,
             _map,
             _table,
@@ -2581,9 +2539,7 @@ def seniority_output(
     _figure = (
         seniority_chart
         if seniority_chart is not None
-        else mo.callout(
-            mo.md("No seniority level has a nonmissing denominator."), kind="warn"
-        )
+        else mo.callout(mo.md("No seniority level has a nonmissing denominator."), kind="warn")
     )
     _all_categories_table = mo.vstack(
         [
@@ -2600,7 +2556,17 @@ def seniority_output(
     )
     mo.vstack(
         [
-            mo.md("### 5.3. Match rates across seniority levels"),
+            mo.md(
+                """
+                ### 5.3. Match rates across seniority levels
+
+                - **New hires who are more senior are more likely to show up in the inventor database.**
+                - This is intuitive but has important implications for our sample construction: 
+                    - Are we measuring productivity or seniority among the new hires?
+                    - A company that prefers to hire more senior people will have higher observed productivity based on patents. However, it is not necessarily more productive.
+                - We need to keep this differential match rates across the seniority distribution in mind.
+                """
+            ),
             seniority_metric_selector,
             seniority_country_selector,
             _figure,
@@ -2620,9 +2586,7 @@ def seniority_output(
                         show_column_summaries=False,
                         format_mapping=RATE_TABLE_FORMATS,
                     ),
-                    "View all seniority statistics by country scope": (
-                        _all_categories_table
-                    ),
+                    "View all seniority statistics by country scope": (_all_categories_table),
                 }
             ),
         ],
@@ -2698,9 +2662,9 @@ def start_month_rates(
     start_month_table = start_month_summary.loc[
         start_month_summary["scope_key"] == start_month_table_scope_selector.value
     ].copy()
-    start_month_plot_table = start_month_plot_table.sort_values(
-        ["month", "country_scope"]
-    ).drop(columns=["scope_key"], errors="ignore")
+    start_month_plot_table = start_month_plot_table.sort_values(["month", "country_scope"]).drop(
+        columns=["scope_key"], errors="ignore"
+    )
     start_month_table = start_month_table.sort_values("month").drop(
         columns=["scope_key"],
         errors="ignore",
@@ -2722,9 +2686,7 @@ def start_month_output(
     _figure = (
         start_month_chart
         if start_month_chart is not None
-        else mo.callout(
-            mo.md("No valid focal-hire start month is available."), kind="warn"
-        )
+        else mo.callout(mo.md("No valid focal-hire start month is available."), kind="warn")
     )
     _all_months_table = mo.vstack(
         [
@@ -2742,14 +2704,14 @@ def start_month_output(
     )
     mo.vstack(
         [
-            mo.md("### 5.4. Match rates across focal-hire start months"),
+            mo.md(
+                """
+                ### 5.4. Match rates across focal-hire start months
+                """
+            ),
             start_month_metric_selector,
             start_month_country_selector,
             _figure,
-            mo.md(
-                "The chart is monthly and shows the all-country, U.S., and non-U.S. "
-                "or selected-country series separately."
-            ),
             mo.accordion(
                 {
                     "View statistics plotted in the figure": mo.ui.table(
@@ -2760,28 +2722,11 @@ def start_month_output(
                         show_column_summaries=False,
                         format_mapping=RATE_TABLE_FORMATS,
                     ),
-                    "View all start-month statistics by country scope": (
-                        _all_months_table
-                    ),
+                    "View all start-month statistics by country scope": (_all_months_table),
                 }
             ),
         ],
         gap=1,
-    )
-    return
-
-
-@app.cell
-def interpretation(mo):
-    mo.callout(
-        mo.md(
-            "**Interpretation boundary.** A nonmatch combines never patenting, patenting "
-            "outside the available PatentsView coverage, and failed user-to-inventor linkage. "
-            "Differences across countries, occupations, industries, states, seniority, and "
-            "time can therefore reflect coverage and linkage quality as well as real inventive "
-            "activity."
-        ),
-        kind="warn",
     )
     return
 
