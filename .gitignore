@@ -64,6 +64,3 @@
 # <> Ignore archive directories regardless of depth, prefix, suffix, or case.
 /codes/**/*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]*/
 /reports/**/*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]*/
-
-# <> Other specific folders/files that should be ignored
-!/reports/2026-08-25 (Marimo) Candidate focal new hires and their presence in USPTO/**
