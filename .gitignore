@@ -15,6 +15,7 @@
 # >> Generated Python and notebook state
 /codes/**/__pycache__/
 /codes/**/__marimo__/
+/codes/**/layouts/
 /codes/**/.ipynb_checkpoints/
 /codes/**/.mypy_cache/
 /codes/**/.pytest_cache/
@@ -41,6 +42,13 @@
 /codes/**/*.xlsx
 /codes/**/*.zip
 
+# >> Other subfolders
+
+/codes/**/notes/
+/codes/**/fabric/
+/codes/**/tasks/
+
+
 # <> Track only final reports in pdf or python files (no tex files or figures).
 
 /reports/**
@@ -56,3 +64,6 @@
 # <> Ignore archive directories regardless of depth, prefix, suffix, or case.
 /codes/**/*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]*/
 /reports/**/*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]*/
+
+# <> Other specific folders/files that should be ignored
+!/reports/2026-08-25 (Marimo) Candidate focal new hires and their presence in USPTO/**
