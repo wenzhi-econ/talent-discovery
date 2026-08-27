@@ -15,6 +15,7 @@
 # >> Generated Python and notebook state
 /codes/**/__pycache__/
 /codes/**/__marimo__/
+/codes/**/layouts/
 /codes/**/.ipynb_checkpoints/
 /codes/**/.mypy_cache/
 /codes/**/.pytest_cache/
@@ -40,6 +41,13 @@
 /codes/**/*.xls
 /codes/**/*.xlsx
 /codes/**/*.zip
+
+# >> Other subfolders
+
+/codes/**/notes/
+/codes/**/fabric/
+/codes/**/tasks/
+
 
 # <> Track only final reports in pdf or python files (no tex files or figures).
 
