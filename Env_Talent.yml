@@ -18,7 +18,7 @@ dependencies:
   - notebook=7.6.2
   - ipywidgets=8.1.8
   - jupytext=1.19.5
-  - marimo=0.23.16
+  - marimo=0.24.0
   - nbconvert=7.17.1
   - nbconvert-webpdf=7.17.1
   - quarto=1.9.38
@@ -53,6 +53,7 @@ dependencies:
   - plotnine=0.15.8
   - plotly=6.9.0
   - altair=6.2.2
+  - vl-convert-python=1.9.0
 
   # Excel files
   - xlrd=2.0.2
